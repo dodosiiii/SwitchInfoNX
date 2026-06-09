@@ -4,8 +4,10 @@ SOURCES		:=	source
 INCLUDES	:=	include
 
 TITLE		:=	Switch Info NX
-AUTHOR		:=	Dev
-VERSION		:=	4.0.0
+AUTHOR		:=	dodosi
+VERSION		:=	0.0.1
+
+ICON		:=	icon.jpg
 
 ifeq ($(strip $(DEVKITPRO)),)
 $(error "Please set DEVKITPRO in your environment. export DEVKITPRO=<path to>/devkitpro")
@@ -30,7 +32,7 @@ ASFLAGS		:=	-g $(ARCH)
 LDFLAGS		:=	-specs="$(DEVKITPRO)/libnx/switch.specs" $(ARCH)
 LDFLAGS		+=	-Wl,-Map,$(TARGET).map -Wl,--gc-sections
 
-LIBS		:=	-lnx -lm
+LIBS		:=	-lSDL2_ttf -lSDL2_gfx -lSDL2 -lharfbuzz -lfreetype -lbz2 -lpng -lz -lEGL -lstdc++ -lglapi -ldrm_nouveau -lnx -lm
 
 LIBDIRS		:=	-L"$(DEVKITPRO)/libnx/lib" -L"$(DEVKITPRO)/portlibs/switch/lib"
 
@@ -50,9 +52,12 @@ else
 LD	:=	$(CXX)
 endif
 
-.PHONY: all clean
+.PHONY: all clean icon
 
 all: $(TARGET).nro
+
+icon:
+	@bash tools/make_icon.sh
 
 $(BUILD):
 	mkdir -p "$@"
@@ -72,8 +77,8 @@ $(TARGET).elf: $(OBJS)
 $(NACP):
 	$(NACPTOOL) --create "$(TITLE)" "$(AUTHOR)" "$(VERSION)" "$@"
 
-$(TARGET).nro: $(TARGET).elf $(NACP)
-	$(ELF2NRO) "$<" "$@" --nacp="$(NACP)"
+$(TARGET).nro: $(TARGET).elf $(NACP) $(ICON)
+	$(ELF2NRO) "$<" "$@" --nacp="$(NACP)" --icon="$(ICON)"
 
 clean:
 	rm -rf "$(BUILD)" "$(TARGET).elf" "$(TARGET).nro" "$(TARGET).nacp"
