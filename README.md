@@ -16,7 +16,7 @@
 > All-in-one hardware monitor, diagnostics, system info & file transfer tool for the Nintendo Switch.
 
 **Long description:**  
-SwitchInfoNX is a feature-rich homebrew application that turns your Nintendo Switch into a diagnostics workstation. It provides a real-time overview of **CPU/GPU/memory clocks**, **FPS**, **RAM & [...]
+SwitchInfoNX is a feature-rich homebrew application that turns your Nintendo Switch into a diagnostics workstation. It provides a real-time overview of CPU/GPU/memory clocks, FPS, RAM & [...]
 
 ---
 
