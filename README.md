@@ -22,44 +22,44 @@ SwitchInfoNX is a feature-rich homebrew application that turns your Nintendo Swi
 
 ## ✨ Features
 
-**📊 System Information**  
+** System Information**  
 Firmware version, serial number, hardware type (Erista/Mariko), region, language, battery level & charging status, Joy-Con battery, skin temperature, display brightness, blue light filter, uptime
 
-**💾 Storage**  
+** Storage**  
 SD card usage, NAND partitions (USER/SYSTEM/SAFE), SD read speed test, homebrew app count
 
-**🌐 Network**  
+** Network**  
 IP/MAC address, SSID, signal strength history graph (60s), connection time, Wi-Fi band detection
 
-**⚡ Performance**  
+*  Performance**  
 Live CPU/GPU/MEM clock gauges, FPS counter with 60-frame line chart, RAM usage bar, CPU/GPU/MEM load indicators, performance score, temperature history, thermal alerts
 
-**🎮 Controller Diagnostics**  
+** Controller Diagnostics**  
 Full button/stick test, analog stick X/Y visualisation, trigger diagnostics, gyroscope & accelerometer six-axis sensor readout
 
-**🔧 Tools**  
+** Tools**  
 Display brightness control, haptic vibration motor test, dead-pixel screen test (R/G/B/W/B), system report export, perf metrics export, screenshot capture
 
-**📁 File Browser**  
+** File Browser**  
 Full SD card file manager with enter, back, delete, rename, copy, cut, paste — all touch-friendly
 
-**📡 File Transfer**  
+** File Transfer**  
 Built-in MTP (Media Transfer Protocol) and HTTP Wi-Fi file transfer
 
-**🎨 Custom Themes**  
+** Custom Themes**  
 15 built-in presets + full custom theme editor with real-time RGB color picker (10 UI slots)
 
-**🌍 i18n**  
+** i18n**  
 11 languages: English, French, Italian, Spanish, German, Portuguese, Dutch, Japanese, Russian, Chinese, Korean
 
-**🔔 Alerts**  
+*  Alerts**  
 Configurable temperature & memory usage thresholds with in-app toast notifications
 
 ---
 
 ## 📦 Installation
 
-1. Download the latest `SwitchInfoNX.nro` from [Releases](https://github.com/dodosi/SwitchInfoNX/releases)
+1. Download the latest `SwitchInfoNX.nro` from [Releases](https://github.com/dodosiiii/SwitchInfoNX/releases)
 2. Copy it to `sdmc:/switch/SwitchInfoNX/` on your Switch SD card
 3. Launch via any homebrew launcher (Atmosphère, HBMenu, etc.)
 
@@ -79,7 +79,7 @@ sudo dkp-pacman -S switch-dev switch-sdl2 switch-sdl2_ttf switch-sdl2_gfx \
 ### Build
 
 ```bash
-git clone https://github.com/dodosi/SwitchInfoNX.git
+git clone https://github.com/dodosiiii/SwitchInfoNX.git
 cd SwitchInfoNX
 make
 ```
@@ -131,7 +131,7 @@ This project is open source. See the source files for details.
 ---
 
 <div align="center">
-  <sub>Built with ❤️ by dodosi</sub>
+  <sub>Built with ❤️ by dodosiiii</sub>
   <br>
   <sub>Nintendo Switch is a trademark of Nintendo Co., Ltd. This is an unofficial homebrew project.</sub>
 </div>
