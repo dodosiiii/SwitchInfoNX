@@ -3,7 +3,7 @@
   <h1>SwitchInfoNX</h1>
   <p><strong>Premium system information & hardware diagnostic utility for Nintendo Switch homebrew</strong></p>
   <p>
-    <img src="https://img.shields.io/badge/version-0.0.3-blue?style=flat-square"/>
+    <img src="https://img.shields.io/badge/version-0.0.2-blue?style=flat-square"/>
     <img src="https://img.shields.io/badge/platform-Nintendo%20Switch-e60012?style=flat-square"/>
     <img src="https://img.shields.io/badge/build-devtoolchain-40aef0?style=flat-square"/>
   </p>
