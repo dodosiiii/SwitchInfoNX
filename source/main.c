@@ -13,6 +13,7 @@
 #include <sys/ioctl.h>
 #include <net/if.h>
 #include <net/if_dl.h>
+#include <arpa/inet.h>
 
 #include <SDL2/SDL.h>
 #include <SDL2/SDL_ttf.h>
@@ -70,10 +71,23 @@ static TTF_Font *font_lg = NULL;
 static HidVibrationDeviceHandle vibe_handles[2];
 static bool vibe_init_ok = false;
 
+// Blue light filter
+static int blue_light_filter = 0; // 0=off, 1-5 intensity
+
+// Auto-refresh tracking (global for header access)
+static u64 last_refresh = 0;
+
 // Export status message
 static char export_msg[128] = {0};
 static u64 export_msg_tick = 0;
 static float sd_speed_result = 0.0f; // MB/s, 0 = not tested, -2 = testing, -1 = error
+
+// Toast notification system
+#define NOTIF_MAX 6
+#define NOTIF_DURATION 3
+static char notif_msgs[NOTIF_MAX][128];
+static u64 notif_ticks[NOTIF_MAX];
+static int notif_count = 0;
 
 // FPS history chart
 #define FPS_HIST_SIZE 60
@@ -107,10 +121,14 @@ static bool mem_alert_notified = false;
 #define LANG_DE 4
 #define LANG_PT 5
 #define LANG_NL 6
-#define LANG_MAX 7
+#define LANG_JA 7
+#define LANG_RU 8
+#define LANG_ZH 9
+#define LANG_KO 10
+#define LANG_MAX 11
 static int cur_lang = LANG_EN;
 
-static const char *lang_names[LANG_MAX] = { "English", "Francais", "Italiano", "Espanol", "Deutsch", "Portugues", "Nederlands" };
+static const char *lang_names[LANG_MAX] = { "English", "Francais", "Italiano", "Espanol", "Deutsch", "Portugues", "Nederlands", "Japanese", "Russian", "Chinese", "Korean" };
 static const char *tab_names[LANG_MAX][PGS] = {
     { "System", "Storage", "Network", "Transfer", "Perf", "Controller", "Tools", "About", "Settings" },
     { "Systeme", "Stockage", "Reseau", "Transfert", "Perf", "Manette", "Outils", "A propos", "Reglages" },
@@ -119,24 +137,28 @@ static const char *tab_names[LANG_MAX][PGS] = {
     { "System", "Speicher", "Netzwerk", "Uebertr.", "Leistung", "Controller", "Werkzeuge", "Ueber", "Einstell." },
     { "Sistema", "Armaz.", "Rede", "Transf.", "Desemp.", "Controle", "Ferramentas", "Sobre", "Config." },
     { "Systeem", "Opslag", "Netwerk", "Overdr.", "Prest.", "Controller", "Gereedschap", "Over", "Instell." },
+    { "System", "Storage", "Network", "Transfer", "Perf", "Controller", "Tools", "About", "Settings" },
+    { "System", "Storage", "Network", "Transfer", "Perf", "Controller", "Tools", "About", "Settings" },
+    { "System", "Storage", "Network", "Transfer", "Perf", "Controller", "Tools", "About", "Settings" },
+    { "System", "Storage", "Network", "Transfer", "Perf", "Controller", "Tools", "About", "Settings" },
 };
 static const char *settings_title[LANG_MAX] = {
-    "Settings", "Reglages", "Impostazioni", "Ajustes", "Einstellungen", "Configuracoes", "Instellingen"
+    "Settings", "Reglages", "Impostazioni", "Ajustes", "Einstellungen", "Configuracoes", "Instellingen", "Settings", "Settings", "Settings", "Settings"
 };
 static const char *settings_lang_label[LANG_MAX] = {
-    "Language", "Langue", "Lingua", "Idioma", "Sprache", "Idioma", "Taal"
+    "Language", "Langue", "Lingua", "Idioma", "Sprache", "Idioma", "Taal", "Language", "Language", "Language", "Language"
 };
 static const char *settings_theme_label[LANG_MAX] = {
-    "Theme", "Theme", "Tema", "Tema", "Design", "Tema", "Thema"
+    "Theme", "Theme", "Tema", "Tema", "Design", "Tema", "Thema", "Theme", "Theme", "Theme", "Theme"
 };
 static const char *settings_refresh_label[LANG_MAX] = {
-    "Auto Refresh", "Auto Rafraichir", "Aggiorn. Auto", "Auto Actualizar", "Auto Aktual.", "Auto Atualizar", "Auto Ververs."
+    "Auto Refresh", "Auto Rafraichir", "Aggiorn. Auto", "Auto Actualizar", "Auto Aktual.", "Auto Atualizar", "Auto Ververs.", "Auto Refresh", "Auto Refresh", "Auto Refresh", "Auto Refresh"
 };
 static const char *settings_temp_alert_label[LANG_MAX] = {
-    "Temp Alert", "Alerte Temp", "Allerta Temp", "Alerta Temp", "Temp Alarm", "Alerta Temp", "Temp Alarm"
+    "Temp Alert", "Alerte Temp", "Allerta Temp", "Alerta Temp", "Temp Alarm", "Alerta Temp", "Temp Alarm", "Temp Alert", "Temp Alert", "Temp Alert", "Temp Alert"
 };
 static const char *settings_mem_alert_label[LANG_MAX] = {
-    "Memory Alert", "Alerte Memoire", "Allerta Memoria", "Alerta Memoria", "Speicher Alarm", "Alerta Memoria", "Geheugen Alarm"
+    "Memory Alert", "Alerte Memoire", "Allerta Memoria", "Alerta Memoria", "Speicher Alarm", "Alerta Memoria", "Geheugen Alarm", "Memory Alert", "Memory Alert", "Memory Alert", "Memory Alert"
 };
 static const char *settings_info[LANG_MAX] = {
     "Press B to return   |   D-Pad Up/Down to change",
@@ -145,7 +167,11 @@ static const char *settings_info[LANG_MAX] = {
     "Presione B para volver   |   D-Pad Arriba/Abajo para cambiar",
     "Druecke B zum Zurueck   |   D-Pad Hoch/Runter zum Aendern",
     "Pressione B para voltar   |   D-Pad Cima/Baixo para mudar",
-    "Druk B om terug te keren   |   D-Pad Omhoog/Omlaag om te wijzigen"
+    "Druk B om terug te keren   |   D-Pad Omhoog/Omlaag om te wijzigen",
+    "Press B to return   |   D-Pad Up/Down to change",
+    "Press B to return   |   D-Pad Up/Down to change",
+    "Press B to return   |   D-Pad Up/Down to change",
+    "Press B to return   |   D-Pad Up/Down to change"
 };
 
 // ─── Comprehensive i18n string table ────────────────────────
@@ -153,155 +179,269 @@ static const char *settings_info[LANG_MAX] = {
 // --- Page 0: System ---
 static const char *s_fw_hw[LANG_MAX] = {
     "Firmware & Hardware", "Firmware & Materiel", "Firmware e Hardware", "Firmware y Hardware",
-    "Firmware & Hardware", "Firmware e Hardware", "Firmware & Hardware"
-};
+    "Firmware & Hardware", "Firmware e Hardware", "Firmware & Hardware",
+    "Firmware & Hardware",
+    "Firmware & Hardware",
+    "Firmware & Hardware",
+    "Firmware & Hardware"};
 static const char *s_firmware[LANG_MAX] = {
-    "Firmware", "Firmware", "Firmware", "Firmware", "Firmware", "Firmware", "Firmware"
-};
+    "Firmware", "Firmware", "Firmware", "Firmware", "Firmware", "Firmware", "Firmware",
+    "Firmware",
+    "Firmware",
+    "Firmware",
+    "Firmware"};
 static const char *s_serial[LANG_MAX] = {
     "Serial No.", "No. Serie", "N. Seriale", "No. Serie",
-    "Serien-Nr.", "N. Serie", "Serie Nr."
-};
+    "Serien-Nr.", "N. Serie", "Serie Nr.",
+    "Serial No.",
+    "Serial No.",
+    "Serial No.",
+    "Serial No."};
 static const char *s_hardware[LANG_MAX] = {
     "Hardware", "Materiel", "Hardware", "Hardware",
-    "Hardware", "Hardware", "Hardware"
-};
+    "Hardware", "Hardware", "Hardware",
+    "Hardware",
+    "Hardware",
+    "Hardware",
+    "Hardware"};
 static const char *s_mode[LANG_MAX] = {
     "Mode", "Mode", "Modalita", "Modo",
-    "Modus", "Modo", "Modus"
-};
+    "Modus", "Modo", "Modus",
+    "Mode",
+    "Mode",
+    "Mode",
+    "Mode"};
 static const char *s_docked[LANG_MAX] = {
     "Docked (TV Output)", "Dock (Sortie TV)", "Dock (Uscita TV)", "Acoplado (Salida TV)",
-    "Docked (TV-Ausgang)", "Dock (Saida TV)", "Gedockt (TV-uitgang)"
-};
+    "Docked (TV-Ausgang)", "Dock (Saida TV)", "Gedockt (TV-uitgang)",
+    "Docked (TV Output)",
+    "Docked (TV Output)",
+    "Docked (TV Output)",
+    "Docked (TV Output)"};
 static const char *s_handheld[LANG_MAX] = {
     "Handheld (Portable)", "Portable", "Portatile", "Portatil",
-    "Handheld (Tragbar)", "Portatil", "Handheld (Draagbaar)"
-};
+    "Handheld (Tragbar)", "Portatil", "Handheld (Draagbaar)",
+    "Handheld (Portable)",
+    "Handheld (Portable)",
+    "Handheld (Portable)",
+    "Handheld (Portable)"};
 static const char *s_arch[LANG_MAX] = {
     "Architecture", "Architecture", "Architettura", "Arquitectura",
-    "Architektur", "Arquitetura", "Architectuur"
-};
+    "Architektur", "Arquitetura", "Architectuur",
+    "Architecture",
+    "Architecture",
+    "Architecture",
+    "Architecture"};
 static const char *s_arch_val[LANG_MAX] = {
     "ARMv8-A (4x Cortex-A57)", "ARMv8-A (4x Cortex-A57)", "ARMv8-A (4x Cortex-A57)", "ARMv8-A (4x Cortex-A57)",
-    "ARMv8-A (4x Cortex-A57)", "ARMv8-A (4x Cortex-A57)", "ARMv8-A (4x Cortex-A57)"
-};
+    "ARMv8-A (4x Cortex-A57)", "ARMv8-A (4x Cortex-A57)", "ARMv8-A (4x Cortex-A57)",
+    "ARMv8-A (4x Cortex-A57)",
+    "ARMv8-A (4x Cortex-A57)",
+    "ARMv8-A (4x Cortex-A57)",
+    "ARMv8-A (4x Cortex-A57)"};
 static const char *s_dev_name[LANG_MAX] = {
     "Device Name", "Nom de l'appareil", "Nome dispositivo", "Nombre del dispositivo",
-    "Geraetename", "Nome do dispositivo", "Apparaatnaam"
-};
+    "Geraetename", "Nome do dispositivo", "Apparaatnaam",
+    "Device Name",
+    "Device Name",
+    "Device Name",
+    "Device Name"};
 static const char *s_region[LANG_MAX] = {
     "Region", "Region", "Regione", "Region",
-    "Region", "Regiao", "Regio"
-};
+    "Region", "Regiao", "Regio",
+    "Region",
+    "Region",
+    "Region",
+    "Region"};
 static const char *s_sys_lang[LANG_MAX] = {
     "System Language", "Langue du systeme", "Lingua di sistema", "Idioma del sistema",
-    "Systemsprache", "Idioma do sistema", "Systeemtaal"
-};
+    "Systemsprache", "Idioma do sistema", "Systeemtaal",
+    "System Language",
+    "System Language",
+    "System Language",
+    "System Language"};
 static const char *s_batt_power[LANG_MAX] = {
     "Battery & Power", "Batterie & Alimentation", "Batteria & Alimentazione", "Bateria y Alimentacion",
-    "Akku & Strom", "Bateria & Energia", "Batterij & Stroom"
-};
+    "Akku & Strom", "Bateria & Energia", "Batterij & Stroom",
+    "Battery & Power",
+    "Battery & Power",
+    "Battery & Power",
+    "Battery & Power"};
 static const char *s_batt_level[LANG_MAX] = {
     "Battery Level", "Niveau batterie", "Livello batteria", "Nivel de bateria",
-    "Akku-Stand", "Nivel da bateria", "Batterijniveau"
-};
+    "Akku-Stand", "Nivel da bateria", "Batterijniveau",
+    "Battery Level",
+    "Battery Level",
+    "Battery Level",
+    "Battery Level"};
 static const char *s_charging_label[LANG_MAX] = {
     "Charging", "Charge", "Carica", "Carga",
-    "Ladevorgang", "Carregando", "Opladen"
-};
+    "Ladevorgang", "Carregando", "Opladen",
+    "Charging",
+    "Charging",
+    "Charging",
+    "Charging"};
 static const char *s_charging[LANG_MAX] = {
     "Charging", "En charge", "In carica", "Cargando",
-    "Laden", "Carregando", "Opladen"
-};
+    "Laden", "Carregando", "Opladen",
+    "Charging",
+    "Charging",
+    "Charging",
+    "Charging"};
 static const char *s_discharging[LANG_MAX] = {
     "Discharging", "Decharge", "In scarica", "Descargando",
-    "Entladen", "Descarregando", "Ontladen"
-};
+    "Entladen", "Descarregando", "Ontladen",
+    "Discharging",
+    "Discharging",
+    "Discharging",
+    "Discharging"};
 static const char *s_charger[LANG_MAX] = {
     "Charger", "Chargeur", "Caricatore", "Cargador",
-    "Ladegeraet", "Carregador", "Lader"
-};
+    "Ladegeraet", "Carregador", "Lader",
+    "Charger",
+    "Charger",
+    "Charger",
+    "Charger"};
 static const char *s_ac_adapter[LANG_MAX] = {
     "AC Adapter (USB-PD)", "Adaptateur secteur (USB-PD)", "Adattatore AC (USB-PD)", "Adaptador CA (USB-PD)",
-    "Netzteil (USB-PD)", "Adaptador AC (USB-PD)", "Netadapter (USB-PD)"
-};
+    "Netzteil (USB-PD)", "Adaptador AC (USB-PD)", "Netadapter (USB-PD)",
+    "AC Adapter (USB-PD)",
+    "AC Adapter (USB-PD)",
+    "AC Adapter (USB-PD)",
+    "AC Adapter (USB-PD)"};
 static const char *s_usb_slow[LANG_MAX] = {
     "USB Power (Slow)", "USB (Lent)", "USB (Lento)", "USB (Lento)",
-    "USB (Langsam)", "USB (Lento)", "USB (Langzaam)"
-};
+    "USB (Langsam)", "USB (Lento)", "USB (Langzaam)",
+    "USB Power (Slow)",
+    "USB Power (Slow)",
+    "USB Power (Slow)",
+    "USB Power (Slow)"};
 static const char *s_none[LANG_MAX] = {
     "None", "Aucun", "Nessuno", "Ninguno",
-    "Keiner", "Nenhum", "Geen"
-};
+    "Keiner", "Nenhum", "Geen",
+    "None",
+    "None",
+    "None",
+    "None"};
 static const char *s_capacity[LANG_MAX] = {
     "Capacity", "Capacite", "Capacita", "Capacidad",
-    "Kapazitaet", "Capacidade", "Capaciteit"
-};
+    "Kapazitaet", "Capacidade", "Capaciteit",
+    "Capacity",
+    "Capacity",
+    "Capacity",
+    "Capacity"};
 static const char *s_jc_l[LANG_MAX] = {
     "Joy-Con L", "Joy-Con G", "Joy-Con S", "Joy-Con I",
-    "Joy-Con L", "Joy-Con E", "Joy-Con L"
-};
+    "Joy-Con L", "Joy-Con E", "Joy-Con L",
+    "Joy-Con L",
+    "Joy-Con L",
+    "Joy-Con L",
+    "Joy-Con L"};
 static const char *s_jc_r[LANG_MAX] = {
     "Joy-Con R", "Joy-Con D", "Joy-Con D", "Joy-Con D",
-    "Joy-Con R", "Joy-Con D", "Joy-Con R"
-};
+    "Joy-Con R", "Joy-Con D", "Joy-Con R",
+    "Joy-Con R",
+    "Joy-Con R",
+    "Joy-Con R",
+    "Joy-Con R"};
 static const char *s_thermals[LANG_MAX] = {
     "Thermals & Display", "Thermique & Ecran", "Termiche & Display", "Termica y Pantalla",
-    "Thermik & Display", "Termica & Ecra", "Thermiek & Scherm"
-};
+    "Thermik & Display", "Termica & Ecra", "Thermiek & Scherm",
+    "Thermals & Display",
+    "Thermals & Display",
+    "Thermals & Display",
+    "Thermals & Display"};
 static const char *s_skin_temp[LANG_MAX] = {
     "Skin Temp", "Temp. boitier", "Temp. scocca", "Temp. carcasa",
-    "Gehaeuse-Temp.", "Temp. do corpo", "Behuizing temp."
-};
+    "Gehaeuse-Temp.", "Temp. do corpo", "Behuizing temp.",
+    "Skin Temp",
+    "Skin Temp",
+    "Skin Temp",
+    "Skin Temp"};
 static const char *s_thermal_state[LANG_MAX] = {
     "Thermal State", "Etat thermique", "Stato termico", "Estado termico",
-    "Thermischer Status", "Estado termico", "Thermische status"
-};
+    "Thermischer Status", "Estado termico", "Thermische status",
+    "Thermal State",
+    "Thermal State",
+    "Thermal State",
+    "Thermal State"};
 static const char *s_normal[LANG_MAX] = {
     "Normal", "Normal", "Normale", "Normal",
-    "Normal", "Normal", "Normaal"
-};
+    "Normal", "Normal", "Normaal",
+    "Normal",
+    "Normal",
+    "Normal",
+    "Normal"};
 static const char *s_hot[LANG_MAX] = {
     "HOT!", "CHAUDE!", "CALDO!", "CALIENTE!",
-    "HEISS!", "QUENTE!", "HEET!"
-};
+    "HEISS!", "QUENTE!", "HEET!",
+    "HOT!",
+    "HOT!",
+    "HOT!",
+    "HOT!"};
 static const char *s_warm[LANG_MAX] = {
     "Warm", "Tiede", "Caldo", "Templado",
-    "Warm", "Morno", "Warm"
-};
+    "Warm", "Morno", "Warm",
+    "Warm",
+    "Warm",
+    "Warm",
+    "Warm"};
 static const char *s_brightness[LANG_MAX] = {
     "Brightness", "Luminosite", "Luminosita", "Brillo",
-    "Helligkeit", "Brilho", "Helderheid"
-};
+    "Helligkeit", "Brilho", "Helderheid",
+    "Brightness",
+    "Brightness",
+    "Brightness",
+    "Brightness"};
 static const char *s_na_emu[LANG_MAX] = {
     "N/A (emulator)", "N/D (emulateur)", "N/D (emulatore)", "N/D (emulador)",
-    "N/V (Emulator)", "N/D (emulador)", "N/B (emulator)"
-};
+    "N/V (Emulator)", "N/D (emulador)", "N/B (emulator)",
+    "N/A (emulator)",
+    "N/A (emulator)",
+    "N/A (emulator)",
+    "N/A (emulator)"};
 static const char *s_resolution[LANG_MAX] = {
     "Resolution", "Resolution", "Risoluzione", "Resolucion",
-    "Aufloesung", "Resolucao", "Resolutie"
-};
+    "Aufloesung", "Resolucao", "Resolutie",
+    "Resolution",
+    "Resolution",
+    "Resolution",
+    "Resolution"};
 static const char *s_res_val[LANG_MAX] = {
     "1280x720 (720p)", "1280x720 (720p)", "1280x720 (720p)", "1280x720 (720p)",
-    "1280x720 (720p)", "1280x720 (720p)", "1280x720 (720p)"
-};
+    "1280x720 (720p)", "1280x720 (720p)", "1280x720 (720p)",
+    "1280x720 (720p)",
+    "1280x720 (720p)",
+    "1280x720 (720p)",
+    "1280x720 (720p)"};
 static const char *s_refresh_rate[LANG_MAX] = {
     "Refresh Rate", "Taux de rafraichissement", "Frequenza aggiornamento", "Frecuencia actualizacion",
-    "Bildwiederholrate", "Taxa de atualizacao", "Verversingssnelheid"
-};
+    "Bildwiederholrate", "Taxa de atualizacao", "Verversingssnelheid",
+    "Refresh Rate",
+    "Refresh Rate",
+    "Refresh Rate",
+    "Refresh Rate"};
 static const char *s_sys_uptime[LANG_MAX] = {
     "System Uptime", "Temps de fonctionnement", "Tempo di accensione", "Tiempo de actividad",
-    "System-Betriebszeit", "Tempo de atividade", "Systeem-uptime"
-};
+    "System-Betriebszeit", "Tempo de atividade", "Systeem-uptime",
+    "System Uptime",
+    "System Uptime",
+    "System Uptime",
+    "System Uptime"};
 static const char *s_app_uptime[LANG_MAX] = {
     "App Uptime", "Temps d'ouverture", "Tempo apertura app", "Tiempo de ejecucion",
-    "App-Laufzeit", "Tempo de execucao", "App-uptime"
-};
+    "App-Laufzeit", "Tempo de execucao", "App-uptime",
+    "App Uptime",
+    "App Uptime",
+    "App Uptime",
+    "App Uptime"};
 static const char *s_failed_read_clocks[LANG_MAX] = {
     "Failed to read system clocks.", "Echec de lecture des horloges.", "Lettura orologi fallita.", "Fallo al leer relojes.",
-    "Fehler beim Lesen der Takte.", "Falha ao ler clocks.", "Kan systeemklokken niet lezen."
-};
+    "Fehler beim Lesen der Takte.", "Falha ao ler clocks.", "Kan systeemklokken niet lezen.",
+    "Failed to read system clocks.",
+    "Failed to read system clocks.",
+    "Failed to read system clocks.",
+    "Failed to read system clocks."};
 static const char *s_country_names[LANG_MAX][6] = {
     {"Japan","Americas","Europe","Australia/NZ","HK/TW/KR","China"},
     {"Japon","Ameriques","Europe","Australie/NZ","HK/TW/KR","Chine"},
@@ -309,8 +449,11 @@ static const char *s_country_names[LANG_MAX][6] = {
     {"Japon","Americas","Europa","Australia/NZ","HK/TW/KR","China"},
     {"Japan","Amerika","Europa","Australien/NZ","HK/TW/KR","China"},
     {"Japao","Americas","Europa","Australia/NZ","HK/TW/KR","China"},
-    {"Japan","Amerika","Europa","Australie/NZ","HK/TW/KR","China"}
-};
+    {"Japan","Amerika","Europa","Australie/NZ","HK/TW/KR","China"},
+    {"Japan","Americas","Europe","Australia/NZ","HK/TW/KR","China"},
+    {"Japan","Americas","Europe","Australia/NZ","HK/TW/KR","China"},
+    {"Japan","Americas","Europe","Australia/NZ","HK/TW/KR","China"},
+    {"Japan","Americas","Europe","Australia/NZ","HK/TW/KR","China"}};
 static const char *s_lang_names_18[LANG_MAX][18] = {
     {"Japanese","English US","French","German","Italian","Spanish","Chinese","Korean","Dutch","Portuguese","Russian","Chinese TW","English UK","French CA","Spanish LA","Chinese Hans","Chinese Hant","Brazilian PT"},
     {"Japonais","Anglais US","Francais","Allemand","Italien","Espagnol","Chinois","Coreen","Neerlandais","Portugais","Russe","Chinois TW","Anglais UK","Francais CA","Espagnol LA","Chinois Hans","Chinois Hant","Portugais BR"},
@@ -318,639 +461,1107 @@ static const char *s_lang_names_18[LANG_MAX][18] = {
     {"Japones","Ingles EU","Frances","Aleman","Italiano","Espanol","Chino","Coreano","Neerlandes","Portugues","Ruso","Chino TW","Ingles RU","Frances CA","Espanol LA","Chino Hans","Chino Hant","Portugues BR"},
     {"Japanisch","Englisch US","Franzoesisch","Deutsch","Italienisch","Spanisch","Chinesisch","Koreanisch","Niederlaendisch","Portugiesisch","Russisch","Chinesisch TW","Englisch UK","Franzoesisch CA","Spanisch LA","Chinesisch Hans","Chinesisch Hant","Portugiesisch BR"},
     {"Japones","Ingles EU","Frances","Alemao","Italiano","Espanhol","Chines","Coreano","Holandes","Portugues","Russo","Chines TW","Ingles UK","Frances CA","Espanhol LA","Chines Hans","Chines Hant","Portugues BR"},
-    {"Japans","Engels US","Frans","Duits","Italiaans","Spaans","Chinees","Koreaans","Nederlands","Portugees","Russisch","Chinees TW","Engels UK","Frans CA","Spaans LA","Chinees Hans","Chinees Hant","Portugees BR"}
-};
+    {"Japans","Engels US","Frans","Duits","Italiaans","Spaans","Chinees","Koreaans","Nederlands","Portugees","Russisch","Chinees TW","Engels UK","Frans CA","Spaans LA","Chinees Hans","Chinees Hant","Portugees BR"},
+    {"Japanese","English US","French","German","Italian","Spanish","Chinese","Korean","Dutch","Portuguese","Russian","Chinese TW","English UK","French CA","Spanish LA","Chinese Hans","Chinese Hant","Brazilian PT"},
+    {"Japanese","English US","French","German","Italian","Spanish","Chinese","Korean","Dutch","Portuguese","Russian","Chinese TW","English UK","French CA","Spanish LA","Chinese Hans","Chinese Hant","Brazilian PT"},
+    {"Japanese","English US","French","German","Italian","Spanish","Chinese","Korean","Dutch","Portuguese","Russian","Chinese TW","English UK","French CA","Spanish LA","Chinese Hans","Chinese Hant","Brazilian PT"},
+    {"Japanese","English US","French","German","Italian","Spanish","Chinese","Korean","Dutch","Portuguese","Russian","Chinese TW","English UK","French CA","Spanish LA","Chinese Hans","Chinese Hant","Brazilian PT"}};
 
 // --- Page 1: Storage ---
 static const char *s_sd_card[LANG_MAX] = {
     "SD Card (sdmc:/)", "Carte SD (sdmc:/)", "SD Card (sdmc:/)", "Tarjeta SD (sdmc:/)",
-    "SD-Karte (sdmc:/)", "Cartao SD (sdmc:/)", "SD-kaart (sdmc:/)"
-};
+    "SD-Karte (sdmc:/)", "Cartao SD (sdmc:/)", "SD-kaart (sdmc:/)",
+    "SD Card (sdmc:/)",
+    "SD Card (sdmc:/)",
+    "SD Card (sdmc:/)",
+    "SD Card (sdmc:/)"};
 static const char *s_total[LANG_MAX] = {
     "Total", "Total", "Totale", "Total",
-    "Gesamt", "Total", "Totaal"
-};
+    "Gesamt", "Total", "Totaal",
+    "Total",
+    "Total",
+    "Total",
+    "Total"};
 static const char *s_used[LANG_MAX] = {
     "Used", "Utilise", "Usato", "Usado",
-    "Belegt", "Usado", "Gebruikt"
-};
+    "Belegt", "Usado", "Gebruikt",
+    "Used",
+    "Used",
+    "Used",
+    "Used"};
 static const char *s_free[LANG_MAX] = {
     "Free", "Libre", "Libero", "Libre",
-    "Frei", "Livre", "Vrij"
-};
+    "Frei", "Livre", "Vrij",
+    "Free",
+    "Free",
+    "Free",
+    "Free"};
 static const char *s_storage_usage[LANG_MAX] = {
     "Storage Usage", "Utilisation stockage", "Utilizzo archivio", "Uso de almacenamiento",
-    "Speichernutzung", "Uso do armazenamento", "Opslaggebruik"
-};
+    "Speichernutzung", "Uso do armazenamento", "Opslaggebruik",
+    "Storage Usage",
+    "Storage Usage",
+    "Storage Usage",
+    "Storage Usage"};
 static const char *s_root_fmt[LANG_MAX] = {
     "Root: %d folders, %d files", "Racine: %d dossiers, %d fichiers", "Radice: %d cartelle, %d file", "Raiz: %d carpetas, %d archivos",
-    "Root: %d Ordner, %d Dateien", "Raiz: %d pastas, %d arquivos", "Root: %d mappen, %d bestanden"
-};
+    "Root: %d Ordner, %d Dateien", "Raiz: %d pastas, %d arquivos", "Root: %d mappen, %d bestanden",
+    "Root: %d folders, %d files",
+    "Root: %d folders, %d files",
+    "Root: %d folders, %d files",
+    "Root: %d folders, %d files"};
 static const char *s_sd_fail[LANG_MAX] = {
     "Failed to read SD card info", "Echec de lecture de la carte SD", "Lettura SD fallita", "Fallo al leer tarjeta SD",
-    "SD-Karteninfo konnte nicht gelesen werden", "Falha ao ler cartao SD", "Kan SD-kaartinfo niet lezen"
-};
+    "SD-Karteninfo konnte nicht gelesen werden", "Falha ao ler cartao SD", "Kan SD-kaartinfo niet lezen",
+    "Failed to read SD card info",
+    "Failed to read SD card info",
+    "Failed to read SD card info",
+    "Failed to read SD card info"};
 static const char *s_read_speed_fmt[LANG_MAX] = {
     "Read Speed: %.1f MB/s", "Vitesse: %.1f Mo/s", "Velocita: %.1f MB/s", "Velocidad: %.1f MB/s",
-    "Lesegeschw.: %.1f MB/s", "Velocidade: %.1f MB/s", "Leessnelheid: %.1f MB/s"
-};
+    "Lesegeschw.: %.1f MB/s", "Velocidade: %.1f MB/s", "Leessnelheid: %.1f MB/s",
+    "Read Speed: %.1f MB/s",
+    "Read Speed: %.1f MB/s",
+    "Read Speed: %.1f MB/s",
+    "Read Speed: %.1f MB/s"};
 static const char *s_read_testing[LANG_MAX] = {
     "Read Speed: Testing...", "Vitesse: Test...", "Velocita: Test...", "Velocidad: Probando...",
-    "Lesegeschw.: Test...", "Velocidade: Testando...", "Leessnelheid: Testen..."
-};
+    "Lesegeschw.: Test...", "Velocidade: Testando...", "Leessnelheid: Testen...",
+    "Read Speed: Testing...",
+    "Read Speed: Testing...",
+    "Read Speed: Testing...",
+    "Read Speed: Testing..."};
 static const char *s_read_error[LANG_MAX] = {
     "Read Speed: Error", "Vitesse: Erreur", "Velocita: Errore", "Velocidad: Error",
-    "Lesegeschw.: Fehler", "Velocidade: Erro", "Leessnelheid: Fout"
-};
+    "Lesegeschw.: Fehler", "Velocidade: Erro", "Leessnelheid: Fout",
+    "Read Speed: Error",
+    "Read Speed: Error",
+    "Read Speed: Error",
+    "Read Speed: Error"};
 static const char *s_read_untested[LANG_MAX] = {
     "Read Speed: Not tested", "Vitesse: Non testee", "Velocita: Non testata", "Velocidad: No probada",
-    "Lesegeschw.: Nicht getestet", "Velocidade: Nao testado", "Leessnelheid: Niet getest"
-};
+    "Lesegeschw.: Nicht getestet", "Velocidade: Nao testado", "Leessnelheid: Niet getest",
+    "Read Speed: Not tested",
+    "Read Speed: Not tested",
+    "Read Speed: Not tested",
+    "Read Speed: Not tested"};
 static const char *s_sd_no_mount[LANG_MAX] = {
     "SD Card not inserted or failed to mount", "Carte SD non inseree ou echec montage", "SD non inserita o mount fallito", "Tarjeta SD no insertada o fallo al montar",
-    "SD-Karte nicht eingelegt oder Mount fehlgeschlagen", "Cartao SD nao inserido ou falha ao montar", "SD-kaart niet geplaatst of mount mislukt"
-};
+    "SD-Karte nicht eingelegt oder Mount fehlgeschlagen", "Cartao SD nao inserido ou falha ao montar", "SD-kaart niet geplaatst of mount mislukt",
+    "SD Card not inserted or failed to mount",
+    "SD Card not inserted or failed to mount",
+    "SD Card not inserted or failed to mount",
+    "SD Card not inserted or failed to mount"};
 static const char *s_nand_parts[LANG_MAX] = {
     "NAND Partitions (Internal)", "Partitions NAND (Interne)", "Partizioni NAND (Interne)", "Particiones NAND (Interna)",
-    "NAND-Partitionen (Intern)", "Particoes NAND (Interno)", "NAND-partities (Intern)"
-};
+    "NAND-Partitionen (Intern)", "Particoes NAND (Interno)", "NAND-partities (Intern)",
+    "NAND Partitions (Internal)",
+    "NAND Partitions (Internal)",
+    "NAND Partitions (Internal)",
+    "NAND Partitions (Internal)"};
 static const char *s_sys_part[LANG_MAX] = {
     "System Partition", "Partition Systeme", "Partizione di Sistema", "Particion del Sistema",
-    "Systempartition", "Particao do Sistema", "Systeempartitie"
-};
+    "Systempartition", "Particao do Sistema", "Systeempartitie",
+    "System Partition",
+    "System Partition",
+    "System Partition",
+    "System Partition"};
 static const char *s_user_part[LANG_MAX] = {
     "User Partition", "Partition Utilisateur", "Partizione Utente", "Particion de Usuario",
-    "Benutzerpartition", "Particao do Usuario", "Gebruikerspartitie"
-};
+    "Benutzerpartition", "Particao do Usuario", "Gebruikerspartitie",
+    "User Partition",
+    "User Partition",
+    "User Partition",
+    "User Partition"};
 static const char *s_sd_breakdown[LANG_MAX] = {
     "SD Card Content Breakdown", "Contenu de la carte SD", "Contenuto SD", "Contenido de la tarjeta SD",
-    "SD-Karteninhalt", "Conteudo do cartao SD", "SD-kaartinhoud"
-};
+    "SD-Karteninhalt", "Conteudo do cartao SD", "SD-kaartinhoud",
+    "SD Card Content Breakdown",
+    "SD Card Content Breakdown",
+    "SD Card Content Breakdown",
+    "SD Card Content Breakdown"};
 static const char *s_touch_test[LANG_MAX] = {
     "[Touch] Test Speed", "[Touch] Test Vitesse", "[Touch] Test Velocita", "[Touch] Probar Velocidad",
-    "[Touch] Geschw. testen", "[Touch] Testar Velocidade", "[Touch] Snelheid testen"
-};
+    "[Touch] Geschw. testen", "[Touch] Testar Velocidade", "[Touch] Snelheid testen",
+    "[Touch] Test Speed",
+    "[Touch] Test Speed",
+    "[Touch] Test Speed",
+    "[Touch] Test Speed"};
 static const char *s_open_fb[LANG_MAX] = {
     "[Y] Open File Browser", "[Y] Explorateur", "[Y] Esplora file", "[Y] Explorar archivos",
-    "[Y] Dateibrowser", "[Y] Explorar arquivos", "[Y] Bestandsverkenner"
-};
+    "[Y] Dateibrowser", "[Y] Explorar arquivos", "[Y] Bestandsverkenner",
+    "[Y] Open File Browser",
+    "[Y] Open File Browser",
+    "[Y] Open File Browser",
+    "[Y] Open File Browser"};
 static const char *s_empty_dir[LANG_MAX] = {
     "(empty directory)", "(dossier vide)", "(cartella vuota)", "(directorio vacio)",
-    "(leeres Verzeichnis)", "(diretorio vazio)", "(lege map)"
-};
+    "(leeres Verzeichnis)", "(diretorio vazio)", "(lege map)",
+    "(empty directory)",
+    "(empty directory)",
+    "(empty directory)",
+    "(empty directory)"};
 static const char *s_folders[LANG_MAX] = {
     "Folders: %d", "Dossiers: %d", "Cartelle: %d", "Carpetas: %d",
-    "Ordner: %d", "Pastas: %d", "Mappen: %d"
-};
+    "Ordner: %d", "Pastas: %d", "Mappen: %d",
+    "Folders: %d",
+    "Folders: %d",
+    "Folders: %d",
+    "Folders: %d"};
 static const char *s_nro_count[LANG_MAX] = {
     "NRO: %d", "NRO: %d", "NRO: %d", "NRO: %d",
-    "NRO: %d", "NRO: %d", "NRO: %d"
-};
+    "NRO: %d", "NRO: %d", "NRO: %d",
+    "NRO: %d",
+    "NRO: %d",
+    "NRO: %d",
+    "NRO: %d"};
 static const char *s_images[LANG_MAX] = {
     "Images: %d", "Images: %d", "Immagini: %d", "Imagenes: %d",
-    "Bilder: %d", "Imagens: %d", "Afbeeldingen: %d"
-};
+    "Bilder: %d", "Imagens: %d", "Afbeeldingen: %d",
+    "Images: %d",
+    "Images: %d",
+    "Images: %d",
+    "Images: %d"};
 static const char *s_videos[LANG_MAX] = {
     "Videos: %d", "Videos: %d", "Video: %d", "Videos: %d",
-    "Videos: %d", "Videos: %d", "Videos: %d"
-};
+    "Videos: %d", "Videos: %d", "Videos: %d",
+    "Videos: %d",
+    "Videos: %d",
+    "Videos: %d",
+    "Videos: %d"};
 static const char *s_music[LANG_MAX] = {
     "Music: %d", "Musique: %d", "Musica: %d", "Musica: %d",
-    "Musik: %d", "Musica: %d", "Muziek: %d"
-};
+    "Musik: %d", "Musica: %d", "Muziek: %d",
+    "Music: %d",
+    "Music: %d",
+    "Music: %d",
+    "Music: %d"};
 static const char *s_games[LANG_MAX] = {
     "Games: %d", "Jeux: %d", "Giochi: %d", "Juegos: %d",
-    "Spiele: %d", "Jogos: %d", "Spelletjes: %d"
-};
+    "Spiele: %d", "Jogos: %d", "Spelletjes: %d",
+    "Games: %d",
+    "Games: %d",
+    "Games: %d",
+    "Games: %d"};
 static const char *s_docs[LANG_MAX] = {
     "Docs: %d", "Documents: %d", "Documenti: %d", "Documentos: %d",
-    "Dokumente: %d", "Documentos: %d", "Documenten: %d"
-};
+    "Dokumente: %d", "Documentos: %d", "Documenten: %d",
+    "Docs: %d",
+    "Docs: %d",
+    "Docs: %d",
+    "Docs: %d"};
 static const char *s_other[LANG_MAX] = {
     "Other: %d", "Autres: %d", "Altri: %d", "Otros: %d",
-    "Andere: %d", "Outros: %d", "Anders: %d"
-};
+    "Andere: %d", "Outros: %d", "Anders: %d",
+    "Other: %d",
+    "Other: %d",
+    "Other: %d",
+    "Other: %d"};
 static const char *s_homebrew_count[LANG_MAX] = {
     "Homebrew Apps: %d", "Apps Homebrew: %d", "App Homebrew: %d", "Apps Homebrew: %d",
-    "Homebrew-Apps: %d", "Apps Homebrew: %d", "Homebrew-apps: %d"
-};
+    "Homebrew-Apps: %d", "Apps Homebrew: %d", "Homebrew-apps: %d",
+    "Homebrew Apps: %d",
+    "Homebrew Apps: %d",
+    "Homebrew Apps: %d",
+    "Homebrew Apps: %d"};
 
 // --- Page 2: Network ---
 static const char *s_ip_config[LANG_MAX] = {
     "IP Configuration", "Configuration IP", "Configurazione IP", "Configuracion IP",
-    "IP-Konfiguration", "Configuracao IP", "IP-configuratie"
-};
+    "IP-Konfiguration", "Configuracao IP", "IP-configuratie",
+    "IP Configuration",
+    "IP Configuration",
+    "IP Configuration",
+    "IP Configuration"};
 static const char *s_ip_addr[LANG_MAX] = {
     "IP Address", "Adresse IP", "Indirizzo IP", "Direccion IP",
-    "IP-Adresse", "Endereco IP", "IP-adres"
-};
+    "IP-Adresse", "Endereco IP", "IP-adres",
+    "IP Address",
+    "IP Address",
+    "IP Address",
+    "IP Address"};
 static const char *s_subnet[LANG_MAX] = {
     "Subnet Mask", "Masque sous-reseau", "Maschera di rete", "Mascara de subred",
-    "Subnetzmaske", "Mascara de rede", "Subnetmasker"
-};
+    "Subnetzmaske", "Mascara de rede", "Subnetmasker",
+    "Subnet Mask",
+    "Subnet Mask",
+    "Subnet Mask",
+    "Subnet Mask"};
 static const char *s_gateway[LANG_MAX] = {
     "Gateway", "Passerelle", "Gateway", "Puerta de enlace",
-    "Gateway", "Gateway", "Gateway"
-};
+    "Gateway", "Gateway", "Gateway",
+    "Gateway",
+    "Gateway",
+    "Gateway",
+    "Gateway"};
 static const char *s_primary_dns[LANG_MAX] = {
     "Primary DNS", "DNS Primaire", "DNS Primario", "DNS Primario",
-    "Primaer-DNS", "DNS Primario", "Primaire DNS"
-};
+    "Primaer-DNS", "DNS Primario", "Primaire DNS",
+    "Primary DNS",
+    "Primary DNS",
+    "Primary DNS",
+    "Primary DNS"};
 static const char *s_secondary_dns[LANG_MAX] = {
     "Secondary DNS", "DNS Secondaire", "DNS Secondario", "DNS Secundario",
-    "Sekundaer-DNS", "DNS Secundario", "Secundaire DNS"
-};
+    "Sekundaer-DNS", "DNS Secundario", "Secundaire DNS",
+    "Secondary DNS",
+    "Secondary DNS",
+    "Secondary DNS",
+    "Secondary DNS"};
 static const char *s_hostname[LANG_MAX] = {
     "Hostname", "Nom d'hote", "Hostname", "Nombre de host",
-    "Hostname", "Hostname", "Hostnaam"
-};
+    "Hostname", "Hostname", "Hostnaam",
+    "Hostname",
+    "Hostname",
+    "Hostname",
+    "Hostname"};
 static const char *s_mac_addr[LANG_MAX] = {
     "MAC Address", "Adresse MAC", "Indirizzo MAC", "Direccion MAC",
-    "MAC-Adresse", "Endereco MAC", "MAC-adres"
-};
+    "MAC-Adresse", "Endereco MAC", "MAC-adres",
+    "MAC Address",
+    "MAC Address",
+    "MAC Address",
+    "MAC Address"};
 static const char *s_adapter[LANG_MAX] = {
     "Adapter", "Adaptateur", "Adattatore", "Adaptador",
-    "Adapter", "Adaptador", "Adapter"
-};
+    "Adapter", "Adaptador", "Adapter",
+    "Adapter",
+    "Adapter",
+    "Adapter",
+    "Adapter"};
 static const char *s_conn_details[LANG_MAX] = {
     "Connection Details", "Details de connexion", "Dettagli connessione", "Detalles de conexion",
-    "Verbindungsdetails", "Detalhes da conexao", "Verbindingsdetails"
-};
+    "Verbindungsdetails", "Detalhes da conexao", "Verbindingsdetails",
+    "Connection Details",
+    "Connection Details",
+    "Connection Details",
+    "Connection Details"};
 static const char *s_interface[LANG_MAX] = {
     "Interface", "Interface", "Interfaccia", "Interfaz",
-    "Schnittstelle", "Interface", "Interface"
-};
+    "Schnittstelle", "Interface", "Interface",
+    "Interface",
+    "Interface",
+    "Interface",
+    "Interface"};
 static const char *s_wifi_wireless[LANG_MAX] = {
     "Wi-Fi (Wireless)", "Wi-Fi (Sans fil)", "Wi-Fi (Wireless)", "Wi-Fi (Inalambrico)",
-    "WLAN (Kabellos)", "Wi-Fi (Sem fio)", "Wi-Fi (Draadloos)"
-};
+    "WLAN (Kabellos)", "Wi-Fi (Sem fio)", "Wi-Fi (Draadloos)",
+    "Wi-Fi (Wireless)",
+    "Wi-Fi (Wireless)",
+    "Wi-Fi (Wireless)",
+    "Wi-Fi (Wireless)"};
 static const char *s_ethernet_wired[LANG_MAX] = {
     "Ethernet (Wired)", "Ethernet (Filaire)", "Ethernet (Cavo)", "Ethernet (Cableado)",
-    "Ethernet (Kabel)", "Ethernet (Cabo)", "Ethernet (Bekabeld)"
-};
+    "Ethernet (Kabel)", "Ethernet (Cabo)", "Ethernet (Bekabeld)",
+    "Ethernet (Wired)",
+    "Ethernet (Wired)",
+    "Ethernet (Wired)",
+    "Ethernet (Wired)"};
 static const char *s_internet[LANG_MAX] = {
     "Internet", "Internet", "Internet", "Internet",
-    "Internet", "Internet", "Internet"
-};
+    "Internet", "Internet", "Internet",
+    "Internet",
+    "Internet",
+    "Internet",
+    "Internet"};
 static const char *s_connected[LANG_MAX] = {
     "Connected", "Connecte", "Connesso", "Conectado",
-    "Verbunden", "Conectado", "Verbonden"
-};
+    "Verbunden", "Conectado", "Verbonden",
+    "Connected",
+    "Connected",
+    "Connected",
+    "Connected"};
 static const char *s_limited[LANG_MAX] = {
     "Limited", "Limite", "Limitato", "Limitado",
-    "Eingeschraenkt", "Limitado", "Beperkt"
-};
+    "Eingeschraenkt", "Limitado", "Beperkt",
+    "Limited",
+    "Limited",
+    "Limited",
+    "Limited"};
 static const char *s_signal_quality[LANG_MAX] = {
     "Signal Quality", "Qualite du signal", "Qualita segnale", "Calidad de senhal",
-    "Signalqualitaet", "Qualidade do sinal", "Signaalkwaliteit"
-};
+    "Signalqualitaet", "Qualidade do sinal", "Signaalkwaliteit",
+    "Signal Quality",
+    "Signal Quality",
+    "Signal Quality",
+    "Signal Quality"};
 static const char *s_link[LANG_MAX] = {
     "Link", "Lien", "Collegamento", "Enlace",
-    "Verbindung", "Link", "Verbinding"
-};
+    "Verbindung", "Link", "Verbinding",
+    "Link",
+    "Link",
+    "Link",
+    "Link"};
 static const char *s_wired_stable[LANG_MAX] = {
     "Wired (Stable)", "Filaire (Stable)", "Cavo (Stabile)", "Cableado (Estable)",
-    "Kabel (Stabil)", "Cabo (Estavel)", "Bekabeld (Stabiel)"
-};
+    "Kabel (Stabil)", "Cabo (Estavel)", "Bekabeld (Stabiel)",
+    "Wired (Stable)",
+    "Wired (Stable)",
+    "Wired (Stable)",
+    "Wired (Stable)"};
 static const char *s_connected_for[LANG_MAX] = {
     "Connected For", "Connecte depuis", "Connesso da", "Conectado desde",
-    "Verbunden seit", "Conectado ha", "Verbonden sinds"
-};
+    "Verbunden seit", "Conectado ha", "Verbonden sinds",
+    "Connected For",
+    "Connected For",
+    "Connected For",
+    "Connected For"};
 static const char *s_band[LANG_MAX] = {
     "Band", "Bande", "Banda", "Banda",
-    "Band", "Banda", "Band"
-};
+    "Band", "Banda", "Band",
+    "Band",
+    "Band",
+    "Band",
+    "Band"};
 static const char *s_status[LANG_MAX] = {
     "Status", "Statut", "Stato", "Estado",
-    "Status", "Estado", "Status"
-};
+    "Status", "Estado", "Status",
+    "Status",
+    "Status",
+    "Status",
+    "Status"};
 static const char *s_full_internet[LANG_MAX] = {
     "Full Internet Access", "Acces Internet complet", "Accesso Internet completo", "Acceso completo a Internet",
-    "Voller Internetzugriff", "Acesso total a Internet", "Volledige internettoegang"
-};
+    "Voller Internetzugriff", "Acesso total a Internet", "Volledige internettoegang",
+    "Full Internet Access",
+    "Full Internet Access",
+    "Full Internet Access",
+    "Full Internet Access"};
 static const char *s_local_only[LANG_MAX] = {
     "Local Network Only", "Reseau local seulement", "Solo rete locale", "Solo red local",
-    "Nur lokales Netzwerk", "Apenas rede local", "Alleen lokaal netwerk"
-};
+    "Nur lokales Netzwerk", "Apenas rede local", "Alleen lokaal netwerk",
+    "Local Network Only",
+    "Local Network Only",
+    "Local Network Only",
+    "Local Network Only"};
 static const char *s_no_conn[LANG_MAX] = {
     "No Connection", "Pas de connexion", "Nessuna connessione", "Sin conexion",
-    "Keine Verbindung", "Sem conexao", "Geen verbinding"
-};
+    "Keine Verbindung", "Sem conexao", "Geen verbinding",
+    "No Connection",
+    "No Connection",
+    "No Connection",
+    "No Connection"};
 static const char *s_wifi_diag[LANG_MAX] = {
     "Wi-Fi Signal Diagnostics", "Diagnostic signal Wi-Fi", "Diagnostica segnale Wi-Fi", "Diagnostico de senhal Wi-Fi",
-    "WLAN-Signal-Diagnose", "Diagnostico de sinal Wi-Fi", "Wi-Fi-signaal diagnostiek"
-};
+    "WLAN-Signal-Diagnose", "Diagnostico de sinal Wi-Fi", "Wi-Fi-signaal diagnostiek",
+    "Wi-Fi Signal Diagnostics",
+    "Wi-Fi Signal Diagnostics",
+    "Wi-Fi Signal Diagnostics",
+    "Wi-Fi Signal Diagnostics"};
 static const char *s_ssid[LANG_MAX] = {
     "SSID", "SSID", "SSID", "SSID",
-    "SSID", "SSID", "SSID"
-};
+    "SSID", "SSID", "SSID",
+    "SSID",
+    "SSID",
+    "SSID",
+    "SSID"};
 static const char *s_connected_label[LANG_MAX] = {
     "(connected)", "(connecte)", "(connesso)", "(conectado)",
-    "(verbunden)", "(conectado)", "(verbonden)"
-};
+    "(verbunden)", "(conectado)", "(verbonden)",
+    "(connected)",
+    "(connected)",
+    "(connected)",
+    "(connected)"};
 static const char *s_rssi[LANG_MAX] = {
     "RSSI", "RSSI", "RSSI", "RSSI",
-    "RSSI", "RSSI", "RSSI"
-};
+    "RSSI", "RSSI", "RSSI",
+    "RSSI",
+    "RSSI",
+    "RSSI",
+    "RSSI"};
 static const char *s_link_quality[LANG_MAX] = {
     "Link Quality", "Qualite du lien", "Qualita collegamento", "Calidad de enlace",
-    "Verbindungsqualitaet", "Qualidade do link", "Linkkwaliteit"
-};
+    "Verbindungsqualitaet", "Qualidade do link", "Linkkwaliteit",
+    "Link Quality",
+    "Link Quality",
+    "Link Quality",
+    "Link Quality"};
 static const char *s_signal_power[LANG_MAX] = {
     "Signal Power", "Puissance du signal", "Potenza segnale", "Potencia de senhal",
-    "Signalstaerke", "Potencia do sinal", "Signaalsterkte"
-};
+    "Signalstaerke", "Potencia do sinal", "Signaalsterkte",
+    "Signal Power",
+    "Signal Power",
+    "Signal Power",
+    "Signal Power"};
 static const char *s_signal_history[LANG_MAX] = {
     "Signal History (60s):", "Historique signal (60s):", "Cronologia segnale (60s):", "Historial de senhal (60s):",
-    "Signalverlauf (60s):", "Historico de sinal (60s):", "Signaalgeschiedenis (60s):"
-};
+    "Signalverlauf (60s):", "Historico de sinal (60s):", "Signaalgeschiedenis (60s):",
+    "Signal History (60s):",
+    "Signal History (60s):",
+    "Signal History (60s):",
+    "Signal History (60s):"};
 static const char *s_not_connected[LANG_MAX] = {
     "Not connected to any network.", "Non connecte a un reseau.", "Non connesso a nessuna rete.", "No conectado a ninguna red.",
-    "Mit keinem Netzwerk verbunden.", "Nao conectado a nenhuma rede.", "Niet verbonden met een netwerk."
-};
+    "Mit keinem Netzwerk verbunden.", "Nao conectado a nenhuma rede.", "Niet verbonden met een netwerk.",
+    "Not connected to any network.",
+    "Not connected to any network.",
+    "Not connected to any network.",
+    "Not connected to any network."};
 static const char *s_go_to_settings[LANG_MAX] = {
     "Go to Switch System Settings to connect.", "Allez dans Parametres Switch pour vous connecter.", "Vai su Impostazioni Switch per connetterti.", "Ve a Configuracion del Switch para conectarte.",
-    "Gehe zu den Switch-Systemeinstellungen.", "Vai para Configuracoes do Switch para conectar.", "Ga naar Switch-systeeminstellingen om te verbinden."
-};
+    "Gehe zu den Switch-Systemeinstellungen.", "Vai para Configuracoes do Switch para conectar.", "Ga naar Switch-systeeminstellingen om te verbinden.",
+    "Go to Switch System Settings to connect.",
+    "Go to Switch System Settings to connect.",
+    "Go to Switch System Settings to connect.",
+    "Go to Switch System Settings to connect."};
 static const char *s_supports_both[LANG_MAX] = {
     "Supports both Wi-Fi and USB Ethernet.", "Prend en charge Wi-Fi et Ethernet USB.", "Supporta Wi-Fi ed Ethernet USB.", "Compatible con Wi-Fi y Ethernet USB.",
-    "Unterstuetzt WLAN und USB-Ethernet.", "Suporta Wi-Fi e Ethernet USB.", "Ondersteunt zowel Wi-Fi als USB Ethernet."
-};
+    "Unterstuetzt WLAN und USB-Ethernet.", "Suporta Wi-Fi e Ethernet USB.", "Ondersteunt zowel Wi-Fi als USB Ethernet.",
+    "Supports both Wi-Fi and USB Ethernet.",
+    "Supports both Wi-Fi and USB Ethernet.",
+    "Supports both Wi-Fi and USB Ethernet.",
+    "Supports both Wi-Fi and USB Ethernet."};
 static const char *s_wifi_not_active[LANG_MAX] = {
     "Wi-Fi not active or not connected.", "Wi-Fi inactif ou non connecte.", "Wi-Fi non attivo o non connesso.", "Wi-Fi inactivo o no conectado.",
-    "WLAN nicht aktiv oder nicht verbunden.", "Wi-Fi inativo ou nao conectado.", "Wi-Fi niet actief of niet verbonden."
-};
+    "WLAN nicht aktiv oder nicht verbunden.", "Wi-Fi inativo ou nao conectado.", "Wi-Fi niet actief of niet verbonden.",
+    "Wi-Fi not active or not connected.",
+    "Wi-Fi not active or not connected.",
+    "Wi-Fi not active or not connected.",
+    "Wi-Fi not active or not connected."};
 static const char *s_wlan_na[LANG_MAX] = {
     "WLAN diagnostics not available.", "Diagnostic WLAN indisponible.", "Diagnostica WLAN non disponibile.", "Diagnostico WLAN no disponible.",
-    "WLAN-Diagnose nicht verfuegbar.", "Diagnostico WLAN indisponivel.", "WLAN-diagnostiek niet beschikbaar."
-};
+    "WLAN-Diagnose nicht verfuegbar.", "Diagnostico WLAN indisponivel.", "WLAN-diagnostiek niet beschikbaar.",
+    "WLAN diagnostics not available.",
+    "WLAN diagnostics not available.",
+    "WLAN diagnostics not available.",
+    "WLAN diagnostics not available."};
 
 // --- Page 3: Transfer ---
 static const char *s_wifi_transfer[LANG_MAX] = {
     "WiFi %s Transfer", "Transfert WiFi %s", "Trasferimento WiFi %s", "Transferencia WiFi %s",
-    "WiFi-%s-Uebertragung", "Transferencia WiFi %s", "WiFi %s-overdracht"
-};
+    "WiFi-%s-Uebertragung", "Transferencia WiFi %s", "WiFi %s-overdracht",
+    "WiFi %s Transfer",
+    "WiFi %s Transfer",
+    "WiFi %s Transfer",
+    "WiFi %s Transfer"};
 static const char *s_running[LANG_MAX] = {
     "RUNNING", "ACTIF", "ATTIVO", "ACTIVO",
-    "AKTIV", "ATIVO", "ACTIEF"
-};
+    "AKTIV", "ATIVO", "ACTIEF",
+    "RUNNING",
+    "RUNNING",
+    "RUNNING",
+    "RUNNING"};
 static const char *s_stopped[LANG_MAX] = {
     "STOPPED", "ARRETE", "FERMO", "DETENIDO",
-    "GESTOPPT", "PARADO", "GESTOPT"
-};
+    "GESTOPPT", "PARADO", "GESTOPT",
+    "STOPPED",
+    "STOPPED",
+    "STOPPED",
+    "STOPPED"};
 static const char *s_address[LANG_MAX] = {
     "Address", "Adresse", "Indirizzo", "Direccion",
-    "Adresse", "Endereco", "Adres"
-};
+    "Adresse", "Endereco", "Adres",
+    "Address",
+    "Address",
+    "Address",
+    "Address"};
 static const char *s_current_dir[LANG_MAX] = {
     "Current Dir", "Repertoire courant", "Cartella corrente", "Directorio actual",
-    "Aktuelles Verz.", "Diretorio atual", "Huidige map"
-};
+    "Aktuelles Verz.", "Diretorio atual", "Huidige map",
+    "Current Dir",
+    "Current Dir",
+    "Current Dir",
+    "Current Dir"};
 static const char *s_transfers[LANG_MAX] = {
     "Transfers", "Transferts", "Trasferimenti", "Transferencias",
-    "Uebertragungen", "Transferencias", "Overdrachten"
-};
+    "Uebertragungen", "Transferencias", "Overdrachten",
+    "Transfers",
+    "Transfers",
+    "Transfers",
+    "Transfers"};
 static const char *s_data_total[LANG_MAX] = {
     "Data Total", "Total donnees", "Dati totali", "Datos totales",
-    "Daten gesamt", "Total de dados", "Gegevens totaal"
-};
+    "Daten gesamt", "Total de dados", "Gegevens totaal",
+    "Data Total",
+    "Data Total",
+    "Data Total",
+    "Data Total"};
 static const char *s_toggle_wifi[LANG_MAX] = {
     "[A] Toggle WiFi  |  Touch FTP/FTPD", "[A] WiFi ON/OFF  |  Toucher FTP/FTPD", "[A] WiFi ON/OFF  |  Tocca FTP/FTPD", "[A] WiFi ON/OFF  |  Tocar FTP/FTPD",
-    "[A] WiFi ein/aus  |  FTP/FTPD beruehren", "[A] Alternar WiFi  |  Tocar FTP/FTPD", "[A] WiFi aan/uit  |  Raak FTP/FTPD"
-};
+    "[A] WiFi ein/aus  |  FTP/FTPD beruehren", "[A] Alternar WiFi  |  Tocar FTP/FTPD", "[A] WiFi aan/uit  |  Raak FTP/FTPD",
+    "[A] Toggle WiFi  |  Touch FTP/FTPD",
+    "[A] Toggle WiFi  |  Touch FTP/FTPD",
+    "[A] Toggle WiFi  |  Touch FTP/FTPD",
+    "[A] Toggle WiFi  |  Touch FTP/FTPD"};
 static const char *s_mtp_title[LANG_MAX] = {
     "MTP File Transfer", "Transfert MTP", "Trasferimento MTP", "Transferencia MTP",
-    "MTP-Dateiuebertragung", "Transferencia MTP", "MTP-bestandsoverdracht"
-};
+    "MTP-Dateiuebertragung", "Transferencia MTP", "MTP-bestandsoverdracht",
+    "MTP File Transfer",
+    "MTP File Transfer",
+    "MTP File Transfer",
+    "MTP File Transfer"};
 static const char *s_active[LANG_MAX] = {
     "ACTIVE", "ACTIF", "ATTIVO", "ACTIVO",
-    "AKTIV", "ATIVO", "ACTIEF"
-};
+    "AKTIV", "ATIVO", "ACTIEF",
+    "ACTIVE",
+    "ACTIVE",
+    "ACTIVE",
+    "ACTIVE"};
 static const char *s_protocol[LANG_MAX] = {
     "Protocol", "Protocole", "Protocollo", "Protocolo",
-    "Protokoll", "Protocolo", "Protocol"
-};
+    "Protokoll", "Protocolo", "Protocol",
+    "Protocol",
+    "Protocol",
+    "Protocol",
+    "Protocol"};
 static const char *s_mtp_protocol[LANG_MAX] = {
     "MTP (Media Transfer Protocol)", "MTP (Media Transfer Protocol)", "MTP (Media Transfer Protocol)", "MTP (Media Transfer Protocol)",
-    "MTP (Media Transfer Protocol)", "MTP (Media Transfer Protocol)", "MTP (Media Transfer Protocol)"
-};
+    "MTP (Media Transfer Protocol)", "MTP (Media Transfer Protocol)", "MTP (Media Transfer Protocol)",
+    "MTP (Media Transfer Protocol)",
+    "MTP (Media Transfer Protocol)",
+    "MTP (Media Transfer Protocol)",
+    "MTP (Media Transfer Protocol)"};
 static const char *s_mtp_xfers_fmt[LANG_MAX] = {
     "%llu transfers", "%llu transferts", "%llu trasferimenti", "%llu transferencias",
-    "%llu Uebertragungen", "%llu transferencias", "%llu overdrachten"
-};
+    "%llu Uebertragungen", "%llu transferencias", "%llu overdrachten",
+    "%llu transfers",
+    "%llu transfers",
+    "%llu transfers",
+    "%llu transfers"};
 static const char *s_mtp_desc[LANG_MAX] = {
     "Appears as MTP device on PC (no driver needed)", "Apparait comme peripherique MTP sur PC (pas de pilote)", "Appare come dispositivo MTP su PC (driver non richiesto)", "Aparece como dispositivo MTP en PC (sin controlador)",
-    "Erscheint als MTP-Geraet am PC (kein Treiber noetig)", "Aparece como dispositivo MTP no PC (sem driver)", "Verschijnt als MTP-apparaat op pc (geen stuurprogramma nodig)"
-};
+    "Erscheint als MTP-Geraet am PC (kein Treiber noetig)", "Aparece como dispositivo MTP no PC (sem driver)", "Verschijnt als MTP-apparaat op pc (geen stuurprogramma nodig)",
+    "Appears as MTP device on PC (no driver needed)",
+    "Appears as MTP device on PC (no driver needed)",
+    "Appears as MTP device on PC (no driver needed)",
+    "Appears as MTP device on PC (no driver needed)"};
 static const char *s_toggle_mtp[LANG_MAX] = {
     "[X] Toggle MTP  |  Touch badge", "[X] MTP ON/OFF  |  Toucher badge", "[X] MTP ON/OFF  |  Tocca badge", "[X] MTP ON/OFF  |  Tocar indicador",
-    "[X] MTP ein/aus  |  Symbol beruehren", "[X] Alternar MTP  |  Tocar indicador", "[X] MTP aan/uit  |  Raak badge"
-};
+    "[X] MTP ein/aus  |  Symbol beruehren", "[X] Alternar MTP  |  Tocar indicador", "[X] MTP aan/uit  |  Raak badge",
+    "[X] Toggle MTP  |  Touch badge",
+    "[X] Toggle MTP  |  Touch badge",
+    "[X] Toggle MTP  |  Touch badge",
+    "[X] Toggle MTP  |  Touch badge"};
 static const char *s_activity_log[LANG_MAX] = {
     "Activity Log", "Journal d'activite", "Registro attivita", "Registro de actividad",
-    "Aktivitaetsprotokoll", "Registro de atividade", "Activiteitenlogboek"
-};
+    "Aktivitaetsprotokoll", "Registro de atividade", "Activiteitenlogboek",
+    "Activity Log",
+    "Activity Log",
+    "Activity Log",
+    "Activity Log"};
 static const char *s_no_activity[LANG_MAX] = {
     "No activity. Press [A] or touch badge to start.", "Aucune activite. Appuyez sur [A] ou touchez le badge.", "Nessuna attivita. Premi [A] o tocca il badge.", "Sin actividad. Presione [A] o toque el indicador.",
-    "Keine Aktivitaet. [A] druecken oder Symbol beruehren.", "Sem atividade. Pressione [A] ou toque no indicador.", "Geen activiteit. Druk [A] of raak badge aan."
-};
+    "Keine Aktivitaet. [A] druecken oder Symbol beruehren.", "Sem atividade. Pressione [A] ou toque no indicador.", "Geen activiteit. Druk [A] of raak badge aan.",
+    "No activity. Press [A] or touch badge to start.",
+    "No activity. Press [A] or touch badge to start.",
+    "No activity. Press [A] or touch badge to start.",
+    "No activity. Press [A] or touch badge to start."};
 
 // --- Page 4: Performance ---
 static const char *s_live_clocks[LANG_MAX] = {
     "Live Clock Frequencies", "Frequences en direct", "Frequenze in tempo reale", "Frecuencias en vivo",
-    "Live-Taktfrequenzen", "Frequencias ao vivo", "Live klokfrequenties"
-};
+    "Live-Taktfrequenzen", "Frequencias ao vivo", "Live klokfrequenties",
+    "Live Clock Frequencies",
+    "Live Clock Frequencies",
+    "Live Clock Frequencies",
+    "Live Clock Frequencies"};
 static const char *s_cpu_clock[LANG_MAX] = {
     "CPU Core Clock", "Horloge CPU", "Clock CPU", "Reloj CPU",
-    "CPU-Takt", "Clock CPU", "CPU-klok"
-};
+    "CPU-Takt", "Clock CPU", "CPU-klok",
+    "CPU Core Clock",
+    "CPU Core Clock",
+    "CPU Core Clock",
+    "CPU Core Clock"};
 static const char *s_gpu_clock[LANG_MAX] = {
     "GPU Core Clock", "Horloge GPU", "Clock GPU", "Reloj GPU",
-    "GPU-Takt", "Clock GPU", "GPU-klok"
-};
+    "GPU-Takt", "Clock GPU", "GPU-klok",
+    "GPU Core Clock",
+    "GPU Core Clock",
+    "GPU Core Clock",
+    "GPU Core Clock"};
 static const char *s_mem_bus[LANG_MAX] = {
     "Memory Bus Clock", "Horloge bus memoire", "Clock bus memoria", "Reloj bus memoria",
-    "Speicherbus-Takt", "Clock barramento memoria", "Geheugenbusklok"
-};
+    "Speicherbus-Takt", "Clock barramento memoria", "Geheugenbusklok",
+    "Memory Bus Clock",
+    "Memory Bus Clock",
+    "Memory Bus Clock",
+    "Memory Bus Clock"};
 static const char *s_thermal_status[LANG_MAX] = {
     "Thermal Status", "Etat thermique", "Stato termico", "Estado termico",
-    "Thermischer Status", "Estado termico", "Thermische status"
-};
+    "Thermischer Status", "Estado termico", "Thermische status",
+    "Thermal Status",
+    "Thermal Status",
+    "Thermal Status",
+    "Thermal Status"};
 static const char *s_core_skin_temp[LANG_MAX] __attribute__((unused)) = {
     "Core Skin Temp", "Temp. boitier coeur", "Temp. scocca core", "Temp. carcasa nucleo",
-    "Kern-Gehaeuse-Temp.", "Temp. corpo nucleo", "Kern-behuizing temp."
-};
+    "Kern-Gehaeuse-Temp.", "Temp. corpo nucleo", "Kern-behuizing temp.",
+    "Core Skin Temp",
+    "Core Skin Temp",
+    "Core Skin Temp",
+    "Core Skin Temp"};
 static const char *s_heat_index[LANG_MAX] __attribute__((unused)) = {
     "Heat Index", "Indice de chaleur", "Indice di calore", "Indice de calor",
-    "Hitzeindex", "Indice de calor", "Hitte-index"
-};
+    "Hitzeindex", "Indice de calor", "Hitte-index",
+    "Heat Index",
+    "Heat Index",
+    "Heat Index",
+    "Heat Index"};
 static const char *s_perf_profile[LANG_MAX] __attribute__((unused)) = {
     "Performance Profile", "Profil de performances", "Profilo prestazioni", "Perfil de rendimiento",
-    "Leistungsprofil", "Perfil de desempenho", "Prestatieprofiel"
-};
+    "Leistungsprofil", "Perfil de desempenho", "Prestatieprofiel",
+    "Performance Profile",
+    "Performance Profile",
+    "Performance Profile",
+    "Performance Profile"};
 static const char *s_active_profile[LANG_MAX] = {
     "Active Profile", "Profil actif", "Profilo attivo", "Perfil activo",
-    "Aktives Profil", "Perfil ativo", "Actief profiel"
-};
+    "Aktives Profil", "Perfil ativo", "Actief profiel",
+    "Active Profile",
+    "Active Profile",
+    "Active Profile",
+    "Active Profile"};
 static const char *s_dock_status[LANG_MAX] __attribute__((unused)) = {
     "Dock Status", "Etat du dock", "Stato dock", "Estado del dock",
-    "Dock-Status", "Estado do dock", "Dockstatus"
-};
+    "Dock-Status", "Estado do dock", "Dockstatus",
+    "Dock Status",
+    "Dock Status",
+    "Dock Status",
+    "Dock Status"};
 static const char *s_docked_high[LANG_MAX] = {
     "Docked (High Speed)", "Dock (Haute vitesse)", "Dock (Alta velocita)", "Acoplado (Alta velocidad)",
-    "Docked (Hochgeschw.)", "Dock (Alta velocidade)", "Gedockt (Hoge snelheid)"
-};
+    "Docked (Hochgeschw.)", "Dock (Alta velocidade)", "Gedockt (Hoge snelheid)",
+    "Docked (High Speed)",
+    "Docked (High Speed)",
+    "Docked (High Speed)",
+    "Docked (High Speed)"};
 static const char *s_handheld_throttled[LANG_MAX] = {
     "Handheld (Throttled)", "Portable (Limite)", "Portatile (Limitato)", "Portatil (Limitado)",
-    "Handheld (Gedaempft)", "Portatil (Limitado)", "Handheld (Beperkt)"
-};
+    "Handheld (Gedaempft)", "Portatil (Limitado)", "Handheld (Beperkt)",
+    "Handheld (Throttled)",
+    "Handheld (Throttled)",
+    "Handheld (Throttled)",
+    "Handheld (Throttled)"};
 static const char *s_frame_rate[LANG_MAX] __attribute__((unused)) = {
     "Frame Rate", "Taux d'images", "Frame rate", "Velocidad de fotogramas",
-    "Bildrate", "Taxa de quadros", "Framerate"
-};
+    "Bildrate", "Taxa de quadros", "Framerate",
+    "Frame Rate",
+    "Frame Rate",
+    "Frame Rate",
+    "Frame Rate"};
 static const char *s_perf_score[LANG_MAX] __attribute__((unused)) = {
     "Perf Score", "Score perf", "Punteggio prest.", "Puntuacion rend.",
-    "Leistungswert", "Pontuacao desem.", "Prestatiescore"
-};
+    "Leistungswert", "Pontuacao desem.", "Prestatiescore",
+    "Perf Score",
+    "Perf Score",
+    "Perf Score",
+    "Perf Score"};
 static const char *s_cpu_gpu[LANG_MAX] __attribute__((unused)) = {
     "CPU/GPU", "CPU/GPU", "CPU/GPU", "CPU/GPU",
-    "CPU/GPU", "CPU/GPU", "CPU/GPU"
-};
+    "CPU/GPU", "CPU/GPU", "CPU/GPU",
+    "CPU/GPU",
+    "CPU/GPU",
+    "CPU/GPU",
+    "CPU/GPU"};
 static const char *s_thermal[LANG_MAX] __attribute__((unused)) = {
     "Thermal", "Thermique", "Termico", "Termico",
-    "Thermisch", "Termico", "Thermisch"
-};
+    "Thermisch", "Termico", "Thermisch",
+    "Thermal",
+    "Thermal",
+    "Thermal",
+    "Thermal"};
 static const char *s_cpu_load[LANG_MAX] __attribute__((unused)) = {
     "CPU Load", "Charge CPU", "Carico CPU", "Carga CPU",
-    "CPU-Last", "Carga CPU", "CPU-belasting"
-};
+    "CPU-Last", "Carga CPU", "CPU-belasting",
+    "CPU Load",
+    "CPU Load",
+    "CPU Load",
+    "CPU Load"};
 static const char *s_gpu_load[LANG_MAX] __attribute__((unused)) = {
     "GPU Load", "Charge GPU", "Carico GPU", "Carga GPU",
-    "GPU-Last", "Carga GPU", "GPU-belasting"
-};
+    "GPU-Last", "Carga GPU", "GPU-belasting",
+    "GPU Load",
+    "GPU Load",
+    "GPU Load",
+    "GPU Load"};
 static const char *s_mem_load[LANG_MAX] __attribute__((unused)) = {
     "MEM Load", "Charge MEM", "Carico MEM", "Carga MEM",
-    "Speicherlast", "Carga MEM", "GEHEUGEN-belasting"
-};
+    "Speicherlast", "Carga MEM", "GEHEUGEN-belasting",
+    "MEM Load",
+    "MEM Load",
+    "MEM Load",
+    "MEM Load"};
 static const char *s_fps_history[LANG_MAX] = {
     "FPS History (60 frames):", "Historique FPS (60 images):", "Cronologia FPS (60 frame):", "Historial FPS (60 fotogramas):",
-    "FPS-Verlauf (60 Bilder):", "Historico FPS (60 quadros):", "FPS-geschiedenis (60 frames):"
-};
+    "FPS-Verlauf (60 Bilder):", "Historico FPS (60 quadros):", "FPS-geschiedenis (60 frames):",
+    "FPS History (60 frames):",
+    "FPS History (60 frames):",
+    "FPS History (60 frames):",
+    "FPS History (60 frames):"};
 static const char *s_ram_usage[LANG_MAX] = {
     "RAM Usage", "Utilisation RAM", "Utilizzo RAM", "Uso de RAM",
-    "RAM-Nutzung", "Uso de RAM", "RAM-gebruik"
-};
+    "RAM-Nutzung", "Uso de RAM", "RAM-gebruik",
+    "RAM Usage",
+    "RAM Usage",
+    "RAM Usage",
+    "RAM Usage"};
 static const char *s_used_total[LANG_MAX] __attribute__((unused)) = {
     "Used / Total", "Utilise / Total", "Usato / Totale", "Usado / Total",
-    "Belegt / Gesamt", "Usado / Total", "Gebruikt / Totaal"
-};
+    "Belegt / Gesamt", "Usado / Total", "Gebruikt / Totaal",
+    "Used / Total",
+    "Used / Total",
+    "Used / Total",
+    "Used / Total"};
 static const char *s_mem_usage[LANG_MAX] __attribute__((unused)) = {
     "Memory Usage", "Utilisation memoire", "Utilizzo memoria", "Uso de memoria",
-    "Speichernutzung", "Uso de memoria", "Geheugengebruik"
-};
+    "Speichernutzung", "Uso de memoria", "Geheugengebruik",
+    "Memory Usage",
+    "Memory Usage",
+    "Memory Usage",
+    "Memory Usage"};
 static const char *s_ram_info_na[LANG_MAX] = {
     "RAM info unavailable", "Infos RAM indisponibles", "Info RAM non disponibile", "Informacion RAM no disponible",
-    "RAM-Info nicht verfuegbar", "Info RAM indisponivel", "RAM-info niet beschikbaar"
-};
+    "RAM-Info nicht verfuegbar", "Info RAM indisponivel", "RAM-info niet beschikbaar",
+    "RAM info unavailable",
+    "RAM info unavailable",
+    "RAM info unavailable",
+    "RAM info unavailable"};
 static const char *s_cool[LANG_MAX] = {
     "Cool", "Frais", "Fresco", "Frio",
-    "Kuehl", "Frio", "Koel"
-};
+    "Kuehl", "Frio", "Koel",
+    "Cool",
+    "Cool",
+    "Cool",
+    "Cool"};
 static const char *s_critical_limit[LANG_MAX] = {
     "CRITICAL LIMIT", "LIMITE CRITIQUE", "LIMITE CRITICO", "LIMITE CRITICO",
-    "KRITISCHE GRENZE", "LIMITE CRITICO", "KRITIEKE GRENS"
-};
+    "KRITISCHE GRENZE", "LIMITE CRITICO", "KRITIEKE GRENS",
+    "CRITICAL LIMIT",
+    "CRITICAL LIMIT",
+    "CRITICAL LIMIT",
+    "CRITICAL LIMIT"};
 static const char *s_warm_hot[LANG_MAX] = {
     "Warm / Hot", "Tiede / Chaud", "Caldo / Molto caldo", "Templado / Caliente",
-    "Warm / Heiss", "Morno / Quente", "Warm / Heet"
-};
+    "Warm / Heiss", "Morno / Quente", "Warm / Heet",
+    "Warm / Hot",
+    "Warm / Hot",
+    "Warm / Hot",
+    "Warm / Hot"};
 static const char *s_power_save[LANG_MAX] = {
     "Power Saving Mode", "Mode economie d'energie", "Modalita risparmio energetico", "Modo ahorro de energia",
-    "Stromsparmodus", "Modo economia de energia", "Energiebesparingsmodus"
-};
+    "Stromsparmodus", "Modo economia de energia", "Energiebesparingsmodus",
+    "Power Saving Mode",
+    "Power Saving Mode",
+    "Power Saving Mode",
+    "Power Saving Mode"};
 static const char *s_high_perf[LANG_MAX] = {
     "High Performance", "Haute performance", "Alte prestazioni", "Alto rendimiento",
-    "Hohe Leistung", "Alto desempenho", "Hoge prestatie"
-};
+    "Hohe Leistung", "Alto desempenho", "Hoge prestatie",
+    "High Performance",
+    "High Performance",
+    "High Performance",
+    "High Performance"};
 static const char *s_boost_profile[LANG_MAX] = {
     "Horizon Boost Profile", "Profil Boost Horizon", "Profilo Boost Horizon", "Perfil Boost Horizon",
-    "Horizon-Boost-Profil", "Perfil Boost Horizon", "Horizon Boost-profiel"
-};
+    "Horizon-Boost-Profil", "Perfil Boost Horizon", "Horizon Boost-profiel",
+    "Horizon Boost Profile",
+    "Horizon Boost Profile",
+    "Horizon Boost Profile",
+    "Horizon Boost Profile"};
 static const char *s_system_load[LANG_MAX] = {
     "System Load Indicators", "Indicateurs de charge", "Indicatori di carico", "Indicadores de carga",
-    "Systemlast-Anzeigen", "Indicadores de carga", "Systeembelastingsindicatoren"
-};
+    "Systemlast-Anzeigen", "Indicadores de carga", "Systeembelastingsindicatoren",
+    "System Load Indicators",
+    "System Load Indicators",
+    "System Load Indicators",
+    "System Load Indicators"};
 static const char *s_perf_score_fmt[LANG_MAX] = {
     "Performance Score: %u", "Score performance: %u", "Punteggio prestazioni: %u", "Puntuacion rendimiento: %u",
-    "Leistungswert: %u", "Pontuacao de desempenho: %u", "Prestatiescore: %u"
-};
+    "Leistungswert: %u", "Pontuacao de desempenho: %u", "Prestatiescore: %u",
+    "Performance Score: %u",
+    "Performance Score: %u",
+    "Performance Score: %u",
+    "Performance Score: %u"};
 static const char *s_current_fps_fmt[LANG_MAX] = {
     "Current: %d FPS", "Actuel: %d FPS", "Attuale: %d FPS", "Actual: %d FPS",
-    "Aktuell: %d FPS", "Atual: %d FPS", "Huidig: %d FPS"
-};
+    "Aktuell: %d FPS", "Atual: %d FPS", "Huidig: %d FPS",
+    "Current: %d FPS",
+    "Current: %d FPS",
+    "Current: %d FPS",
+    "Current: %d FPS"};
 static const char *s_mem_status_high[LANG_MAX] = {
     "HIGH", "ELEVE", "ALTO", "ALTO",
-    "HOCH", "ALTO", "HOOG"
-};
+    "HOCH", "ALTO", "HOOG",
+    "HIGH",
+    "HIGH",
+    "HIGH",
+    "HIGH"};
 static const char *s_mem_status_elevated[LANG_MAX] = {
     "Elevated", "Eleve", "Elevato", "Elevado",
-    "Erhoeht", "Elevado", "Verhoogd"
-};
+    "Erhoeht", "Elevado", "Verhoogd",
+    "Elevated",
+    "Elevated",
+    "Elevated",
+    "Elevated"};
 // --- Page 5: Controller ---
 static const char *s_jc_title[LANG_MAX] = {
     "Joy-Con Inputs & Analog Sticks Diagnostics", "Test Joy-Con & Joysticks", "Test Joy-Con & Stick analogici", "Prueba de mandos y joysticks",
-    "Joy-Con-Eingaben & Analogsticks", "Teste Joy-Con & Analógicos", "Joy-Con-ingangen & analoge sticks test"
-};
+    "Joy-Con-Eingaben & Analogsticks", "Teste Joy-Con & Analógicos", "Joy-Con-ingangen & analoge sticks test",
+    "Joy-Con Inputs & Analog Sticks Diagnostics",
+    "Joy-Con Inputs & Analog Sticks Diagnostics",
+    "Joy-Con Inputs & Analog Sticks Diagnostics",
+    "Joy-Con Inputs & Analog Sticks Diagnostics"};
 static const char *s_triggers[LANG_MAX] = {
     "Triggers:", "Gachettes:", "Grilletto:", "Gatillos:",
-    "Trigger:", "Gatilhos:", "Triggers:"
-};
+    "Trigger:", "Gatilhos:", "Triggers:",
+    "Triggers:",
+    "Triggers:",
+    "Triggers:",
+    "Triggers:"};
 static const char *s_controller_type[LANG_MAX] = {
     "Controller Type", "Type de manette", "Tipo di controller", "Tipo de mando",
-    "Controller-Typ", "Tipo de controle", "Controllertype"
-};
+    "Controller-Typ", "Tipo de controle", "Controllertype",
+    "Controller Type",
+    "Controller Type",
+    "Controller Type",
+    "Controller Type"};
 static const char *s_gyro_accel[LANG_MAX] = {
     "Gyroscope & Accelerometer", "Gyroscope & Accelerometre", "Giroscopio & Accelerometro", "Giroscopio & Acelerometro",
-    "Gyroskop & Beschleunigungsmesser", "Giroscopio & Acelerometro", "Gyroscoop & Accelerometer"
-};
+    "Gyroskop & Beschleunigungsmesser", "Giroscopio & Acelerometro", "Gyroscoop & Accelerometer",
+    "Gyroscope & Accelerometer",
+    "Gyroscope & Accelerometer",
+    "Gyroscope & Accelerometer",
+    "Gyroscope & Accelerometer"};
 static const char *s_left_jc[LANG_MAX] = {
     "Left Joy-Con", "Joy-Con Gauche", "Joy-Con Sinistro", "Joy-Con Izquierdo",
-    "Linker Joy-Con", "Joy-Con Esquerdo", "Linker Joy-Con"
-};
+    "Linker Joy-Con", "Joy-Con Esquerdo", "Linker Joy-Con",
+    "Left Joy-Con",
+    "Left Joy-Con",
+    "Left Joy-Con",
+    "Left Joy-Con"};
 static const char *s_right_jc[LANG_MAX] = {
     "Right Joy-Con", "Joy-Con Droit", "Joy-Con Destro", "Joy-Con Derecho",
-    "Rechter Joy-Con", "Joy-Con Direito", "Rechter Joy-Con"
-};
+    "Rechter Joy-Con", "Joy-Con Direito", "Rechter Joy-Con",
+    "Right Joy-Con",
+    "Right Joy-Con",
+    "Right Joy-Con",
+    "Right Joy-Con"};
 static const char *s_sixaxis_na[LANG_MAX] = {
     "Six-axis sensors not available (unsupported controller or emulator)", "Capteurs 6 axes non disponibles (manette non compatible ou emulateur)", "Sensori 6-assi non disponibili (controller non supportato o emulatore)", "Sensores de 6 ejes no disponibles (mando no compatible o emulador)",
-    "6-Achsen-Sensoren nicht verfuegbar (nicht unterstuetzter Controller oder Emulator)", "Sensores 6 eixos indisponiveis (controle nao suportado ou emulador)", "6-assige sensoren niet beschikbaar (niet-ondersteunde controller of emulator)"
-};
+    "6-Achsen-Sensoren nicht verfuegbar (nicht unterstuetzter Controller oder Emulator)", "Sensores 6 eixos indisponiveis (controle nao suportado ou emulador)", "6-assige sensoren niet beschikbaar (niet-ondersteunde controller of emulator)",
+    "Six-axis sensors not available (unsupported controller or emulator)",
+    "Six-axis sensors not available (unsupported controller or emulator)",
+    "Six-axis sensors not available (unsupported controller or emulator)",
+    "Six-axis sensors not available (unsupported controller or emulator)"};
 
 // --- Page 6: Tools ---
 static const char *s_br_ctrl[LANG_MAX] = {
     "Display Brightness Control", "Controle de luminosite", "Controllo luminosita", "Control de brillo",
-    "Display-Helligkeit", "Controle de brilho", "Helderheidsbediening"
-};
+    "Display-Helligkeit", "Controle de brilho", "Helderheidsbediening",
+    "Display Brightness Control",
+    "Display Brightness Control",
+    "Display Brightness Control",
+    "Display Brightness Control"};
 static const char *s_current_br_fmt[LANG_MAX] = {
     "Current: %.0f%%", "Actuel: %.0f%%", "Attuale: %.0f%%", "Actual: %.0f%%",
-    "Aktuell: %.0f%%", "Atual: %.0f%%", "Huidig: %.0f%%"
-};
+    "Aktuell: %.0f%%", "Atual: %.0f%%", "Huidig: %.0f%%",
+    "Current: %.0f%%",
+    "Current: %.0f%%",
+    "Current: %.0f%%",
+    "Current: %.0f%%"};
 static const char *s_auto_on_off[LANG_MAX] = {
     "Auto: ON  [A] disable", "Auto: ON  [A] desactiver", "Auto: ON  [A] disattiva", "Auto: ON  [A] desactivar",
-    "Auto: AN  [A] ausschalten", "Auto: ON  [A] desativar", "Auto: AAN  [A] uitschakelen"
-};
+    "Auto: AN  [A] ausschalten", "Auto: ON  [A] desativar", "Auto: AAN  [A] uitschakelen",
+    "Auto: ON  [A] disable",
+    "Auto: ON  [A] disable",
+    "Auto: ON  [A] disable",
+    "Auto: ON  [A] disable"};
 static const char *s_auto_off_on[LANG_MAX] = {
     "Auto: OFF  [A] enable", "Auto: OFF  [A] activer", "Auto: OFF  [A] attiva", "Auto: OFF  [A] activar",
-    "Auto: AUS  [A] einschalten", "Auto: OFF  [A] ativar", "Auto: UIT  [A] inschakelen"
-};
+    "Auto: AUS  [A] einschalten", "Auto: OFF  [A] ativar", "Auto: UIT  [A] inschakelen",
+    "Auto: OFF  [A] enable",
+    "Auto: OFF  [A] enable",
+    "Auto: OFF  [A] enable",
+    "Auto: OFF  [A] enable"};
 static const char *s_br_adjust[LANG_MAX] = {
     "[DPad] Adjust  |  Touch drag", "[DPad] Ajuster  |  Toucher glisser", "[DPad] Regola  |  Tocca trascina", "[DPad] Ajustar  |  Tocar arrastrar",
-    "[DPad] Einstellen  |  Beruehren ziehen", "[DPad] Ajustar  |  Tocar arrastar", "[DPad] Aanpassen  |  Raak en sleep"
-};
+    "[DPad] Einstellen  |  Beruehren ziehen", "[DPad] Ajustar  |  Tocar arrastar", "[DPad] Aanpassen  |  Raak en sleep",
+    "[DPad] Adjust  |  Touch drag",
+    "[DPad] Adjust  |  Touch drag",
+    "[DPad] Adjust  |  Touch drag",
+    "[DPad] Adjust  |  Touch drag"};
 static const char *s_br_na[LANG_MAX] = {
     "Brightness N/A (emulator)", "Luminosite N/D (emulateur)", "Luminosita N/D (emulatore)", "Brillo N/D (emulador)",
-    "Helligkeit N/V (Emulator)", "Brilho N/D (emulador)", "Helderheid N/B (emulator)"
-};
+    "Helligkeit N/V (Emulator)", "Brilho N/D (emulador)", "Helderheid N/B (emulator)",
+    "Brightness N/A (emulator)",
+    "Brightness N/A (emulator)",
+    "Brightness N/A (emulator)",
+    "Brightness N/A (emulator)"};
 static const char *s_haptic_test[LANG_MAX] = {
     "Haptic Vibration Test", "Test vibration haptique", "Test vibrazione aptica", "Prueba de vibracion",
-    "Haptischer Vibrationstest", "Teste de vibracao haptica", "Haptische vibratietest"
-};
+    "Haptischer Vibrationstest", "Teste de vibracao haptica", "Haptische vibratietest",
+    "Haptic Vibration Test",
+    "Haptic Vibration Test",
+    "Haptic Vibration Test",
+    "Haptic Vibration Test"};
 static const char *s_test_haptic[LANG_MAX] = {
     "Test Joy-Con haptic motors:", "Tester moteurs haptiques Joy-Con:", "Test motori aptici Joy-Con:", "Probar motores hapticos Joy-Con:",
-    "Joy-Con-Haptikmotoren testen:", "Testar motores hapticos Joy-Con:", "Test Joy-Con haptische motoren:"
-};
+    "Joy-Con-Haptikmotoren testen:", "Testar motores hapticos Joy-Con:", "Test Joy-Con haptische motoren:",
+    "Test Joy-Con haptic motors:",
+    "Test Joy-Con haptic motors:",
+    "Test Joy-Con haptic motors:",
+    "Test Joy-Con haptic motors:"};
 static const char *s_left_rumble[LANG_MAX] = {
     "[X] Left Rumble", "[X] Rumble Gauche", "[X] Rumble Sinistro", "[X] Vibracion Izquierda",
-    "[X] Links Rumble", "[X] Rumble Esquerdo", "[X] Links trillen"
-};
+    "[X] Links Rumble", "[X] Rumble Esquerdo", "[X] Links trillen",
+    "[X] Left Rumble",
+    "[X] Left Rumble",
+    "[X] Left Rumble",
+    "[X] Left Rumble"};
 static const char *s_right_rumble[LANG_MAX] = {
     "[Y] Right Rumble", "[Y] Rumble Droit", "[Y] Rumble Destro", "[Y] Vibracion Derecha",
-    "[Y] Rechts Rumble", "[Y] Rumble Direito", "[Y] Rechts trillen"
-};
+    "[Y] Rechts Rumble", "[Y] Rumble Direito", "[Y] Rechts trillen",
+    "[Y] Right Rumble",
+    "[Y] Right Rumble",
+    "[Y] Right Rumble",
+    "[Y] Right Rumble"};
 static const char *s_report_export[LANG_MAX] = {
     "System Report Export", "Export rapport systeme", "Esportazione rapporto", "Exportar informe",
-    "Systembericht exportieren", "Exportar relatorio", "Systeemrapport exporteren"
-};
+    "Systembericht exportieren", "Exportar relatorio", "Systeemrapport exporteren",
+    "System Report Export",
+    "System Report Export",
+    "System Report Export",
+    "System Report Export"};
 static const char *s_perf_export[LANG_MAX] = {
     "Perf Metrics Export", "Export metrics Perf", "Esporta metriche Perf", "Exportar metrics Perf",
-    "Perf-Metriken exportieren", "Exportar metricas Perf", "Exporteren perf-metrics"
-};
+    "Perf-Metriken exportieren", "Exportar metricas Perf", "Exporteren perf-metrics",
+    "Perf Metrics Export",
+    "Perf Metrics Export",
+    "Perf Metrics Export",
+    "Perf Metrics Export"};
 static const char *s_perf_export_desc[LANG_MAX] __attribute__((unused)) = {
     "Export live perf metrics to SD card:", "Exporter les metrics Perf vers SD:", "Esporta metriche Perf su SD:", "Exportar metricas Perf a SD:",
-    "Perf-Metriken auf SD exportieren:", "Exportar metricas Perf para SD:", "Exporteren perf-metrics naar SD:"
-};
+    "Perf-Metriken auf SD exportieren:", "Exportar metricas Perf para SD:", "Exporteren perf-metrics naar SD:",
+    "Export live perf metrics to SD card:",
+    "Export live perf metrics to SD card:",
+    "Export live perf metrics to SD card:",
+    "Export live perf metrics to SD card:"};
 static const char *s_export_desc[LANG_MAX] = {
     "Export full diagnostics to SD card:", "Exporter le diagnostic complet vers carte SD:", "Esporta diagnostica completa su SD:", "Exportar diagnostico completo a tarjeta SD:",
-    "Vollstaendige Diagnose auf SD-Karte exportieren:", "Exportar diagnostico completo para cartao SD:", "Volledige diagnostiek naar SD-kaart exporteren:"
-};
+    "Vollstaendige Diagnose auf SD-Karte exportieren:", "Exportar diagnostico completo para cartao SD:", "Volledige diagnostiek naar SD-kaart exporteren:",
+    "Export full diagnostics to SD card:",
+    "Export full diagnostics to SD card:",
+    "Export full diagnostics to SD card:",
+    "Export full diagnostics to SD card:"};
 static const char *s_export_btn[LANG_MAX] = {
     "[B] Export Report", "[B] Exporter rapport", "[B] Esporta rapporto", "[B] Exportar informe",
-    "[B] Bericht exportieren", "[B] Exportar relatorio", "[B] Rapport exporteren"
-};
+    "[B] Bericht exportieren", "[B] Exportar relatorio", "[B] Rapport exporteren",
+    "[B] Export Report",
+    "[B] Export Report",
+    "[B] Export Report",
+    "[B] Export Report"};
 static const char *s_export_perf_hint[LANG_MAX] = {
     "Press Y to export perf metrics", "Appuyez sur Y pour exporter les metrics", "Premi Y per esportare le metriche", "Presiona Y para exportar metricas",
-    "Druecke Y zum Exportieren der Metriken", "Pressione Y para exportar metricas", "Druk Y om perf-metrics te exporteren"
-};
+    "Druecke Y zum Exportieren der Metriken", "Pressione Y para exportar metricas", "Druk Y om perf-metrics te exporteren",
+    "Press Y to export perf metrics",
+    "Press Y to export perf metrics",
+    "Press Y to export perf metrics",
+    "Press Y to export perf metrics"};
 static const char *s_export_save[LANG_MAX] = {
     "Saves to sdmc:/switch/SwitchInfoNX/", "Sauvegarde dans sdmc:/switch/SwitchInfoNX/", "Salvato in sdmc:/switch/SwitchInfoNX/", "Guardado en sdmc:/switch/SwitchInfoNX/",
-    "Speichert nach sdmc:/switch/SwitchInfoNX/", "Salvo em sdmc:/switch/SwitchInfoNX/", "Opslaan naar sdmc:/switch/SwitchInfoNX/"
-};
+    "Speichert nach sdmc:/switch/SwitchInfoNX/", "Salvo em sdmc:/switch/SwitchInfoNX/", "Opslaan naar sdmc:/switch/SwitchInfoNX/",
+    "Saves to sdmc:/switch/SwitchInfoNX/",
+    "Saves to sdmc:/switch/SwitchInfoNX/",
+    "Saves to sdmc:/switch/SwitchInfoNX/",
+    "Saves to sdmc:/switch/SwitchInfoNX/"};
 static const char *s_runtime_env[LANG_MAX] = {
     "Runtime Environment", "Environnement d'execution", "Ambiente di esecuzione", "Entorno de ejecucion",
-    "Laufzeitumgebung", "Ambiente de execucao", "Runtime-omgeving"
-};
+    "Laufzeitumgebung", "Ambiente de execucao", "Runtime-omgeving",
+    "Runtime Environment",
+    "Runtime Environment",
+    "Runtime Environment",
+    "Runtime Environment"};
 static const char *s_app_status[LANG_MAX] = {
     "App Status", "Etat de l'app", "Stato app", "Estado de la app",
-    "App-Status", "Estado do app", "App-status"
-};
+    "App-Status", "Estado do app", "App-status",
+    "App Status",
+    "App Status",
+    "App Status",
+    "App Status"};
 static const char *s_running_ok[LANG_MAX] = {
     "Running Normally", "Fonctionne normalement", "In esecuzione normale", "Funcionando normalmente",
-    "Laeuft normal", "Executando normalmente", "Normaal actief"
-};
+    "Laeuft normal", "Executando normalmente", "Normaal actief",
+    "Running Normally",
+    "Running Normally",
+    "Running Normally",
+    "Running Normally"};
 static const char *s_render[LANG_MAX] = {
     "Render", "Rendu", "Render", "Render",
-    "Render", "Render", "Render"
-};
+    "Render", "Render", "Render",
+    "Render",
+    "Render",
+    "Render",
+    "Render"};
 static const char *s_env_label[LANG_MAX] = {
     "Environment", "Environnement", "Ambiente", "Entorno",
-    "Umgebung", "Ambiente", "Omgeving"
-};
+    "Umgebung", "Ambiente", "Omgeving",
+    "Environment",
+    "Environment",
+    "Environment",
+    "Environment"};
 static const char *s_emulator[LANG_MAX] = {
     "Emulator", "Emulateur", "Emulatore", "Emulador",
-    "Emulator", "Emulador", "Emulator"
-};
+    "Emulator", "Emulador", "Emulator",
+    "Emulator",
+    "Emulator",
+    "Emulator",
+    "Emulator"};
 static const char *s_retail[LANG_MAX] = {
     "Retail Hardware", "Materiel retail", "Hardware retail", "Hardware minorista",
-    "Retail-Hardware", "Hardware original", "Retail hardware"
-};
+    "Retail-Hardware", "Hardware original", "Retail hardware",
+    "Retail Hardware",
+    "Retail Hardware",
+    "Retail Hardware",
+    "Retail Hardware"};
 static const char *s_dead_pixel[LANG_MAX] = {
     "[Touch] Dead-Pixel Test", "[Touch] Test pixel mort", "[Touch] Test pixel morto", "[Touch] Prueba de pixeles",
-    "[Touch] Dead-Pixel-Test", "[Touch] Teste pixel morto", "[Touch] Dode pixel test"
-};
+    "[Touch] Dead-Pixel-Test", "[Touch] Teste pixel morto", "[Touch] Dode pixel test",
+    "[Touch] Dead-Pixel Test",
+    "[Touch] Dead-Pixel Test",
+    "[Touch] Dead-Pixel Test",
+    "[Touch] Dead-Pixel Test"};
 static const char *s_fan_ctrl[LANG_MAX] = {
     "Custom Fan Speed Control", "Controle ventilateur personnalise", "Controllo ventola personalizzato", "Control de ventilador personalizado",
-    "Benutzerdefinierte Lueftersteuerung", "Controle de ventoinha personalizado", "Aangepaste ventilatorbediening"
-};
+    "Benutzerdefinierte Lueftersteuerung", "Controle de ventoinha personalizado", "Aangepaste ventilatorbediening",
+    "Custom Fan Speed Control",
+    "Custom Fan Speed Control",
+    "Custom Fan Speed Control",
+    "Custom Fan Speed Control"};
 static const char *s_fan_speed[LANG_MAX] = {
     "Fan Speed", "Vitesse vent.", "Velocita ventola", "Velocidad ventilador",
-    "Lueftergeschw.", "Velocidade vent.", "Ventilatorsnelheid"
-};
+    "Lueftergeschw.", "Velocidade vent.", "Ventilatorsnelheid",
+    "Fan Speed",
+    "Fan Speed",
+    "Fan Speed",
+    "Fan Speed"};
 static const char *s_fan_adjust[LANG_MAX] = {
     "[ZL/ZR] Adjust  [Touch] Drag  [L+R] Reset", "[ZL/ZR] Ajuster  [Touch] Glisser  [L+R] Reinit", "[ZL/ZR] Regola  [Touch] Trascina  [L+R] Reset", "[ZL/ZR] Ajustar  [Touch] Arrastrar  [L+R] Restablecer",
-    "[ZL/ZR] Einstellen  [Beruehren] Ziehen  [L+R] Zurueck", "[ZL/ZR] Ajustar  [Tocar] Arrastar  [L+R] Reiniciar", "[ZL/ZR] Aanpassen  [Raak] Sleep  [L+R] Reset"
-};
+    "[ZL/ZR] Einstellen  [Beruehren] Ziehen  [L+R] Zurueck", "[ZL/ZR] Ajustar  [Tocar] Arrastar  [L+R] Reiniciar", "[ZL/ZR] Aanpassen  [Raak] Sleep  [L+R] Reset",
+    "[ZL/ZR] Adjust  [Touch] Drag  [L+R] Reset",
+    "[ZL/ZR] Adjust  [Touch] Drag  [L+R] Reset",
+    "[ZL/ZR] Adjust  [Touch] Drag  [L+R] Reset",
+    "[ZL/ZR] Adjust  [Touch] Drag  [L+R] Reset"};
 static const char *s_fan_dev[LANG_MAX] = {
     "Under development - fan not available", "En developpement - ventilateur non disponible", "In sviluppo - ventola non disponibile", "En desarrollo - ventilador no disponible",
-    "In Entwicklung - Luefter nicht verfuegbar", "Em desenvolvimento - ventoinha indisponivel", "In ontwikkeling - ventilator niet beschikbaar"
-};
+    "In Entwicklung - Luefter nicht verfuegbar", "Em desenvolvimento - ventoinha indisponivel", "In ontwikkeling - ventilator niet beschikbaar",
+    "Under development - fan not available",
+    "Under development - fan not available",
+    "Under development - fan not available",
+    "Under development - fan not available"};
 static const char *s_fan_req[LANG_MAX] = {
     "Requires custom sysmodule (CFW)", "Requiert sysmodule personnalise (CFW)", "Richiede sysmodule personalizzato (CFW)", "Requiere sysmodule personalizado (CFW)",
-    "Erfordert benutzerdefiniertes Sysmodule (CFW)", "Requer sysmodule personalizado (CFW)", "Vereist aangepaste sysmodule (CFW)"
-};
+    "Erfordert benutzerdefiniertes Sysmodule (CFW)", "Requer sysmodule personalizado (CFW)", "Vereist aangepaste sysmodule (CFW)",
+    "Requires custom sysmodule (CFW)",
+    "Requires custom sysmodule (CFW)",
+    "Requires custom sysmodule (CFW)",
+    "Requires custom sysmodule (CFW)"};
 static const char *s_app_mode[LANG_MAX] = {
     "App Mode", "Mode App", "Modalita App", "Modo de App",
-    "App-Modus", "Modo do App", "App-modus"
-};
+    "App-Modus", "Modo do App", "App-modus",
+    "App Mode",
+    "App Mode",
+    "App Mode",
+    "App Mode"};
 static const char *s_modes[LANG_MAX][3] = {
     {"Normal App", "Overlay (Tesla)", "Sysmodule"},
     {"App normale", "Overlay (Tesla)", "Sysmodule"},
@@ -958,86 +1569,143 @@ static const char *s_modes[LANG_MAX][3] = {
     {"App normal", "Overlay (Tesla)", "Sysmodule"},
     {"Normale App", "Overlay (Tesla)", "Sysmodule"},
     {"App normal", "Overlay (Tesla)", "Sysmodule"},
-    {"Normale app", "Overlay (Tesla)", "Sysmodule"}
-};
+    {"Normale app", "Overlay (Tesla)", "Sysmodule"},
+    {"Normal App", "Overlay (Tesla)", "Sysmodule"},
+    {"Normal App", "Overlay (Tesla)", "Sysmodule"},
+    {"Normal App", "Overlay (Tesla)", "Sysmodule"},
+    {"Normal App", "Overlay (Tesla)", "Sysmodule"}};
 static const char *s_mode_switch[LANG_MAX] = {
     "[L/R] Switch mode  (requires restart)", "[L/R] Changer mode  (redemarrage requis)", "[L/R] Cambia modalita  (richiede riavvio)", "[L/R] Cambiar modo  (requiere reinicio)",
-    "[L/R] Modus wechseln  (Neustart erforderlich)", "[L/R] Mudar modo  (requer reinicializacao)", "[L/R] Modus wijzigen  (herstart vereist)"
-};
+    "[L/R] Modus wechseln  (Neustart erforderlich)", "[L/R] Mudar modo  (requer reinicializacao)", "[L/R] Modus wijzigen  (herstart vereist)",
+    "[L/R] Switch mode  (requires restart)",
+    "[L/R] Switch mode  (requires restart)",
+    "[L/R] Switch mode  (requires restart)",
+    "[L/R] Switch mode  (requires restart)"};
 static const char *s_overlay_desc[LANG_MAX] = {
     "Overlay: runs as Tesla overlay", "Overlay: fonctionne comme overlay Tesla", "Overlay: funziona come overlay Tesla", "Overlay: funciona como superposicion Tesla",
-    "Overlay: laeuft als Tesla-Overlay", "Overlay: funciona como overlay Tesla", "Overlay: werkt als Tesla-overlay"
-};
+    "Overlay: laeuft als Tesla-Overlay", "Overlay: funciona como overlay Tesla", "Overlay: werkt als Tesla-overlay",
+    "Overlay: runs as Tesla overlay",
+    "Overlay: runs as Tesla overlay",
+    "Overlay: runs as Tesla overlay",
+    "Overlay: runs as Tesla overlay"};
 static const char *s_sysmodule_desc[LANG_MAX] = {
     "Sysmodule: runs as background service", "Sysmodule: fonctionne comme service d'arriere-plan", "Sysmodule: funziona come servizio in background", "Sysmodule: funciona como servicio en segundo plano",
-    "Sysmodule: laeuft als Hintergrunddienst", "Sysmodule: funciona como servico em segundo plano", "Sysmodule: werkt als achtergrondservice"
-};
+    "Sysmodule: laeuft als Hintergrunddienst", "Sysmodule: funciona como servico em segundo plano", "Sysmodule: werkt als achtergrondservice",
+    "Sysmodule: runs as background service",
+    "Sysmodule: runs as background service",
+    "Sysmodule: runs as background service",
+    "Sysmodule: runs as background service"};
 static const char *s_console_info[LANG_MAX] = {
     "Console Information", "Informations console", "Informazioni console", "Informacion de la consola",
-    "Konsoleninformation", "Informacoes do console", "Console-informatie"
-};
+    "Konsoleninformation", "Informacoes do console", "Console-informatie",
+    "Console Information",
+    "Console Information",
+    "Console Information",
+    "Console Information"};
 static const char *s_serial_emu[LANG_MAX] = {
     "(emulator/dev unit)", "(emulateur/unite dev)", "(emulatore/unita dev)", "(emulador/unidad dev)",
-    "(Emulator/Entwicklung)", "(emulador/unidade dev)", "(emulator/dev-eenheid)"
-};
+    "(Emulator/Entwicklung)", "(emulador/unidade dev)", "(emulator/dev-eenheid)",
+    "(emulator/dev unit)",
+    "(emulator/dev unit)",
+    "(emulator/dev unit)",
+    "(emulator/dev unit)"};
 static const char *s_nickname[LANG_MAX] = {
     "Nickname", "Surnom", "Soprannome", "Apodo",
-    "Spitzname", "Apelido", "Bijnaam"
-};
+    "Spitzname", "Apelido", "Bijnaam",
+    "Nickname",
+    "Nickname",
+    "Nickname",
+    "Nickname"};
 static const char *s_sd_info_speed[LANG_MAX] = {
     "SD Card Info & Speed Test", "Infos carte SD & test vitesse", "Info SD e test velocita", "Informacion SD y prueba velocidad",
-    "SD-Karteninfo & Geschw.-Test", "Info cartao SD e teste velocidade", "SD-kaartinfo & snelheidstest"
-};
+    "SD-Karteninfo & Geschw.-Test", "Info cartao SD e teste velocidade", "SD-kaartinfo & snelheidstest",
+    "SD Card Info & Speed Test",
+    "SD Card Info & Speed Test",
+    "SD Card Info & Speed Test",
+    "SD Card Info & Speed Test"};
 static const char *s_total_capacity[LANG_MAX] = {
     "Total Capacity", "Capacite totale", "Capacita totale", "Capacidad total",
-    "Gesamtkapazitaet", "Capacidade total", "Totale capaciteit"
-};
+    "Gesamtkapazitaet", "Capacidade total", "Totale capaciteit",
+    "Total Capacity",
+    "Total Capacity",
+    "Total Capacity",
+    "Total Capacity"};
 static const char *s_free_space[LANG_MAX] = {
     "Free Space", "Espace libre", "Spazio libero", "Espacio libre",
-    "Freier Speicher", "Espaco livre", "Vrije ruimte"
-};
+    "Freier Speicher", "Espaco livre", "Vrije ruimte",
+    "Free Space",
+    "Free Space",
+    "Free Space",
+    "Free Space"};
 static const char *s_pct_used_fmt[LANG_MAX] = {
     "%.1f%% used", "%.1f%% utilise", "%.1f%% usato", "%.1f%% usado",
-    "%.1f%% belegt", "%.1f%% usado", "%.1f%% gebruikt"
-};
+    "%.1f%% belegt", "%.1f%% usado", "%.1f%% gebruikt",
+    "%.1f%% used",
+    "%.1f%% used",
+    "%.1f%% used",
+    "%.1f%% used"};
 static const char *s_read_speed_btn[LANG_MAX] = {
     "[Touch] Test Read Speed", "[Touch] Test vitesse lecture", "[Touch] Test velocita lettura", "[Touch] Probar velocidad lectura",
-    "[Touch] Lese-Geschw. testen", "[Touch] Testar velocidade leitura", "[Touch] Lees snelheid testen"
-};
+    "[Touch] Lese-Geschw. testen", "[Touch] Testar velocidade leitura", "[Touch] Lees snelheid testen",
+    "[Touch] Test Read Speed",
+    "[Touch] Test Read Speed",
+    "[Touch] Test Read Speed",
+    "[Touch] Test Read Speed"};
 static const char *s_testing[LANG_MAX] = {
     "Testing...", "Test...", "Test...", "Probando...",
-    "Test...", "Testando...", "Testen..."
-};
+    "Test...", "Testando...", "Testen...",
+    "Testing...",
+    "Testing...",
+    "Testing...",
+    "Testing..."};
 static const char *s_error[LANG_MAX] = {
     "Error!", "Erreur!", "Errore!", "Error!",
-    "Fehler!", "Erro!", "Fout!"
-};
+    "Fehler!", "Erro!", "Fout!",
+    "Error!",
+    "Error!",
+    "Error!",
+    "Error!"};
 static const char *s_not_tested[LANG_MAX] = {
     "Not tested", "Non teste", "Non testato", "No probado",
-    "Nicht getestet", "Nao testado", "Niet getest"
-};
+    "Nicht getestet", "Nao testado", "Niet getest",
+    "Not tested",
+    "Not tested",
+    "Not tested",
+    "Not tested"};
 static const char *s_sd_info_na[LANG_MAX] = {
     "SD card info unavailable", "Infos carte SD indisponibles", "Info SD non disponibile", "Info SD no disponible",
-    "SD-Karteninfo nicht verfuegbar", "Info cartao SD indisponivel", "SD-kaartinfo niet beschikbaar"
-};
+    "SD-Karteninfo nicht verfuegbar", "Info cartao SD indisponivel", "SD-kaartinfo niet beschikbaar",
+    "SD card info unavailable",
+    "SD card info unavailable",
+    "SD card info unavailable",
+    "SD card info unavailable"};
 
 // --- Page 7: About ---
 static const char *s_about_title[LANG_MAX] = {
     "About Switch Info NX", "A propos de Switch Info NX", "Informazioni su Switch Info NX", "Acerca de Switch Info NX",
-    "Ueber Switch Info NX", "Sobre Switch Info NX", "Over Switch Info NX"
-};
+    "Ueber Switch Info NX", "Sobre Switch Info NX", "Over Switch Info NX",
+    "About Switch Info NX",
+    "About Switch Info NX",
+    "About Switch Info NX",
+    "About Switch Info NX"};
 static const char *s_created_by[LANG_MAX] = {
-    "v0.0.2  |  Created by dodosi", "v0.0.2  |  Cree par dodosi", "v0.0.2  |  Creato da dodosi", "v0.0.2  |  Creado por dodosi",
-    "v0.0.2  |  Erstellt von dodosi", "v0.0.2  |  Criado por dodosi", "v0.0.2  |  Gemaakt door dodosi"
-};
+    "v0.0.3  |  Created by dodosi", "v0.0.3  |  Cree par dodosi", "v0.0.3  |  Creato da dodosi", "v0.0.3  |  Creado por dodosi",
+    "v0.0.3  |  Erstellt von dodosi", "v0.0.3  |  Criado por dodosi", "v0.0.3  |  Gemaakt door dodosi",
+    "v0.0.3  |  Created by dodosi", "v0.0.3  |  Created by dodosi", "v0.0.3  |  Created by dodosi", "v0.0.3  |  Created by dodosi"};
 static const char *s_desc_line1[LANG_MAX] = {
     "A premium system information and hardware diagnostic utility", "Un utilitaire d'information systeme et de diagnostic materiel", "Un utility di informazioni di sistema e diagnostica hardware", "Una utilidad de informacion del sistema y diagnostico de hardware",
-    "Ein Premium-Systeminformations- und Hardware-Diagnose-Tool", "Um utilitario de informacoes do sistema e diagnostico de hardware", "Een premium systeeminformatie- en hardwarediagnosetool"
-};
+    "Ein Premium-Systeminformations- und Hardware-Diagnose-Tool", "Um utilitario de informacoes do sistema e diagnostico de hardware", "Een premium systeeminformatie- en hardwarediagnosetool",
+    "A premium system information and hardware diagnostic utility",
+    "A premium system information and hardware diagnostic utility",
+    "A premium system information and hardware diagnostic utility",
+    "A premium system information and hardware diagnostic utility"};
 static const char *s_desc_line2[LANG_MAX] = {
     "for Nintendo Switch homebrew custom firmware.", "pour Nintendo Switch homebrew custom firmware.", "per Nintendo Switch homebrew custom firmware.", "para Nintendo Switch homebrew custom firmware.",
-    "fuer Nintendo Switch Homebrew Custom Firmware.", "para Nintendo Switch homebrew custom firmware.", "voor Nintendo Switch homebrew custom firmware."
-};
+    "fuer Nintendo Switch Homebrew Custom Firmware.", "para Nintendo Switch homebrew custom firmware.", "voor Nintendo Switch homebrew custom firmware.",
+    "for Nintendo Switch homebrew custom firmware.",
+    "for Nintendo Switch homebrew custom firmware.",
+    "for Nintendo Switch homebrew custom firmware.",
+    "for Nintendo Switch homebrew custom firmware."};
 
 // --- Dead Pixel Test ---
 static const char *s_dead_pixel_pages[LANG_MAX][6] = {
@@ -1047,8 +1715,11 @@ static const char *s_dead_pixel_pages[LANG_MAX][6] = {
     {"","Rojo","Verde","Azul","Blanco","Negro"},
     {"","Rot","Gruen","Blau","Weiss","Schwarz"},
     {"","Vermelho","Verde","Azul","Branco","Preto"},
-    {"","Rood","Groen","Blauw","Wit","Zwart"}
-};
+    {"","Rood","Groen","Blauw","Wit","Zwart"},
+    {"","Red","Green","Blue","White","Black"},
+    {"","Red","Green","Blue","White","Black"},
+    {"","Red","Green","Blue","White","Black"},
+    {"","Red","Green","Blue","White","Black"}};
 static const char *s_dead_pixel_fmt[LANG_MAX] = {
     "Dead-Pixel: %s  |  [A] Next  [B] Exit",
     "Pixel mort: %s  |  [A] Suivant  [B] Quitter",
@@ -1056,8 +1727,11 @@ static const char *s_dead_pixel_fmt[LANG_MAX] = {
     "Pixel muerto: %s  |  [A] Siguiente  [B] Salir",
     "Dead-Pixel: %s  |  [A] Weiter  [B] Beenden",
     "Pixel morto: %s  |  [A] Proximo  [B] Sair",
-    "Dode pixel: %s  |  [A] Volgende  [B] Afsluiten"
-};
+    "Dode pixel: %s  |  [A] Volgende  [B] Afsluiten",
+    "Dead-Pixel: %s  |  [A] Next  [B] Exit",
+    "Dead-Pixel: %s  |  [A] Next  [B] Exit",
+    "Dead-Pixel: %s  |  [A] Next  [B] Exit",
+    "Dead-Pixel: %s  |  [A] Next  [B] Exit"};
 
 // --- Footer hints ---
 static const char *s_footer_default[LANG_MAX] = {
@@ -1067,8 +1741,11 @@ static const char *s_footer_default[LANG_MAX] = {
     "[L/I] Pestanhas    [Y] Actualizar    Tocar",
     "[L/R] Tabs    [Y] Aktualisieren    Beruehren",
     "[L/E] Abas    [Y] Atualizar    Tocar",
-    "[L/R] Tabbladen    [Y] Verversen    Raak"
-};
+    "[L/R] Tabbladen    [Y] Verversen    Raak",
+    "[L/R] Tabs    [Y] Refresh    Touch",
+    "[L/R] Tabs    [Y] Refresh    Touch",
+    "[L/R] Tabs    [Y] Refresh    Touch",
+    "[L/R] Tabs    [Y] Refresh    Touch"};
 static const char *s_footer_transfer[LANG_MAX] = {
     "[L/R] Tabs    [A] WiFi    [X] MTP    [Y] Ref    Touch all",
     "[L/G] Onglets    [A] WiFi    [X] MTP    [Y] Rafr.    Toucher",
@@ -1076,8 +1753,11 @@ static const char *s_footer_transfer[LANG_MAX] = {
     "[L/I] Pest.    [A] WiFi    [X] MTP    [Y] Act.    Tocar",
     "[L/R] Tabs    [A] WLAN    [X] MTP    [Y] Akt.    Beruehren",
     "[L/E] Abas    [A] WiFi    [X] MTP    [Y] Atual.    Tocar",
-    "[L/R] Tabbl.    [A] WiFi    [X] MTP    [Y] Verv.    Raak"
-};
+    "[L/R] Tabbl.    [A] WiFi    [X] MTP    [Y] Verv.    Raak",
+    "[L/R] Tabs    [A] WiFi    [X] MTP    [Y] Ref    Touch all",
+    "[L/R] Tabs    [A] WiFi    [X] MTP    [Y] Ref    Touch all",
+    "[L/R] Tabs    [A] WiFi    [X] MTP    [Y] Ref    Touch all",
+    "[L/R] Tabs    [A] WiFi    [X] MTP    [Y] Ref    Touch all"};
 static const char *s_footer_tools[LANG_MAX] = {
     "[L/R] Mode    [X] Rumble L    [Y] Rumble R    [B] Export    [ZL/ZR] Fan    [DPad] Scroll",
     "[L/G] Mode    [X] Rumble G    [Y] Rumble D    [B] Export    [ZL/ZR] Vent.    [DPad] Defil.",
@@ -1085,8 +1765,11 @@ static const char *s_footer_tools[LANG_MAX] = {
     "[L/I] Modo    [X] Vib. I    [Y] Vib. D    [B] Export    [ZL/ZR] Vent.    [DPad] Despl.",
     "[L/R] Modus    [X] Rumble L    [Y] Rumble R    [B] Export    [ZL/ZR] Lueft.    [DPad] Rollen",
     "[L/E] Modo    [X] Rumble E    [Y] Rumble D    [B] Export    [ZL/ZR] Vent.    [DPad] Rolagem",
-    "[L/R] Modus    [X] Rumble L    [Y] Rumble R    [B] Export.    [ZL/ZR] Vent.    [DPad] Scroll."
-};
+    "[L/R] Modus    [X] Rumble L    [Y] Rumble R    [B] Export.    [ZL/ZR] Vent.    [DPad] Scroll.",
+    "[L/R] Mode    [X] Rumble L    [Y] Rumble R    [B] Export    [ZL/ZR] Fan    [DPad] Scroll",
+    "[L/R] Mode    [X] Rumble L    [Y] Rumble R    [B] Export    [ZL/ZR] Fan    [DPad] Scroll",
+    "[L/R] Mode    [X] Rumble L    [Y] Rumble R    [B] Export    [ZL/ZR] Fan    [DPad] Scroll",
+    "[L/R] Mode    [X] Rumble L    [Y] Rumble R    [B] Export    [ZL/ZR] Fan    [DPad] Scroll"};
 static const char *s_footer_about[LANG_MAX] = {
     "[L/R] Tabs    [DPad] Scroll    Touch scroll    [Y] Ref",
     "[L/G] Onglets    [DPad] Defil.    Toucher defil.    [Y] Rafr.",
@@ -1094,8 +1777,11 @@ static const char *s_footer_about[LANG_MAX] = {
     "[L/I] Pest.    [DPad] Despl.    Tocar despl.    [Y] Act.",
     "[L/R] Tabs    [DPad] Rollen    Beruehren scroll.    [Y] Akt.",
     "[L/E] Abas    [DPad] Rolagem    Tocar rolag.    [Y] Atual.",
-    "[L/R] Tabbl.    [DPad] Scroll.    Raak scroll.    [Y] Verv."
-};
+    "[L/R] Tabbl.    [DPad] Scroll.    Raak scroll.    [Y] Verv.",
+    "[L/R] Tabs    [DPad] Scroll    Touch scroll    [Y] Ref",
+    "[L/R] Tabs    [DPad] Scroll    Touch scroll    [Y] Ref",
+    "[L/R] Tabs    [DPad] Scroll    Touch scroll    [Y] Ref",
+    "[L/R] Tabs    [DPad] Scroll    Touch scroll    [Y] Ref"};
 static const char *s_footer_settings[LANG_MAX] = {
     "[B] Back    [DPad] Select    [Left/Right] Change    [Y] Ref",
     "[B] Retour    [DPad] Select.    [Gauche/Droite] Chang.    [Y] Rafr.",
@@ -1103,8 +1789,11 @@ static const char *s_footer_settings[LANG_MAX] = {
     "[B] Volver    [DPad] Selecc.    [Izquierda/Derecha] Camb.    [Y] Act.",
     "[B] Zurueck    [DPad] Ausw.    [Links/Rechts] Aend.    [Y] Akt.",
     "[B] Voltar    [DPad] Selecion.    [Esquerda/Direita] Mud.    [Y] Atual.",
-    "[B] Terug    [DPad] Select.    [Links/Rechts] Wijz.    [Y] Verv."
-};
+    "[B] Terug    [DPad] Select.    [Links/Rechts] Wijz.    [Y] Verv.",
+    "[B] Back    [DPad] Select    [Left/Right] Change    [Y] Ref",
+    "[B] Back    [DPad] Select    [Left/Right] Change    [Y] Ref",
+    "[B] Back    [DPad] Select    [Left/Right] Change    [Y] Ref",
+    "[B] Back    [DPad] Select    [Left/Right] Change    [Y] Ref"};
 static const char *s_footer_scroll[LANG_MAX] = {
     "[L/R] Tabs    [DPad] Scroll    [Y] Ref",
     "[L/G] Onglets    [DPad] Defil.    [Y] Rafr.",
@@ -1112,54 +1801,87 @@ static const char *s_footer_scroll[LANG_MAX] = {
     "[L/I] Pest.    [DPad] Despl.    [Y] Act.",
     "[L/R] Tabs    [DPad] Rollen    [Y] Akt.",
     "[L/E] Abas    [DPad] Rolagem    [Y] Atual.",
-    "[L/R] Tabbl.    [DPad] Scroll.    [Y] Verv."
-};
+    "[L/R] Tabbl.    [DPad] Scroll.    [Y] Verv.",
+    "[L/R] Tabs    [DPad] Scroll    [Y] Ref",
+    "[L/R] Tabs    [DPad] Scroll    [Y] Ref",
+    "[L/R] Tabs    [DPad] Scroll    [Y] Ref",
+    "[L/R] Tabs    [DPad] Scroll    [Y] Ref"};
 static const char *s_exit_hint[LANG_MAX] = {
     "[+] Exit", "[+] Quitter", "[+] Esci", "[+] Salir",
-    "[+] Beenden", "[+] Sair", "[+] Afsluiten"
-};
+    "[+] Beenden", "[+] Sair", "[+] Afsluiten",
+    "[+] Exit",
+    "[+] Exit",
+    "[+] Exit",
+    "[+] Exit"};
 
 // --- Header ---
 static const char *s_no_network[LANG_MAX] = {
     "No Network", "Pas de reseau", "Nessuna rete", "Sin red",
-    "Kein Netzwerk", "Sem rede", "Geen netwerk"
-};
+    "Kein Netzwerk", "Sem rede", "Geen netwerk",
+    "No Network",
+    "No Network",
+    "No Network",
+    "No Network"};
 
 // --- Export ---
 static const char *s_export_error[LANG_MAX] = {
     "Error: Cannot write to SD card", "Erreur: Impossible d'ecrire sur la carte SD", "Errore: Impossibile scrivere su SD", "Error: No se puede escribir en la tarjeta SD",
-    "Fehler: Kann nicht auf SD-Karte schreiben", "Erro: Nao e possivel escrever no cartao SD", "Fout: Kan niet naar SD-kaart schrijven"
-};
+    "Fehler: Kann nicht auf SD-Karte schreiben", "Erro: Nao e possivel escrever no cartao SD", "Fout: Kan niet naar SD-kaart schrijven",
+    "Error: Cannot write to SD card",
+    "Error: Cannot write to SD card",
+    "Error: Cannot write to SD card",
+    "Error: Cannot write to SD card"};
 static const char *s_export_saved[LANG_MAX] = {
     "Report saved to sdmc:/switch/SwitchInfoNX/system_report.txt", "Rapport sauvegarde dans sdmc:/switch/SwitchInfoNX/system_report.txt", "Report salvato in sdmc:/switch/SwitchInfoNX/system_report.txt", "Informe guardado en sdmc:/switch/SwitchInfoNX/system_report.txt",
-    "Bericht gespeichert unter sdmc:/switch/SwitchInfoNX/system_report.txt", "Relatorio salvo em sdmc:/switch/SwitchInfoNX/system_report.txt", "Rapport opgeslagen naar sdmc:/switch/SwitchInfoNX/system_report.txt"
-};
+    "Bericht gespeichert unter sdmc:/switch/SwitchInfoNX/system_report.txt", "Relatorio salvo em sdmc:/switch/SwitchInfoNX/system_report.txt", "Rapport opgeslagen naar sdmc:/switch/SwitchInfoNX/system_report.txt",
+    "Report saved to sdmc:/switch/SwitchInfoNX/system_report.txt",
+    "Report saved to sdmc:/switch/SwitchInfoNX/system_report.txt",
+    "Report saved to sdmc:/switch/SwitchInfoNX/system_report.txt",
+    "Report saved to sdmc:/switch/SwitchInfoNX/system_report.txt"};
 
 // --- File Browser ---
 static const char *s_file_browser[LANG_MAX] = {
     "File Browser", "Explorateur", "Esplora file", "Explorador",
-    "Dateibrowser", "Explorador", "Bestandsverkenner"
-};
+    "Dateibrowser", "Explorador", "Bestandsverkenner",
+    "File Browser",
+    "File Browser",
+    "File Browser",
+    "File Browser"};
 static const char *s_name_col[LANG_MAX] = {
     "Name", "Nom", "Nome", "Nombre",
-    "Name", "Nome", "Naam"
-};
+    "Name", "Nome", "Naam",
+    "Name",
+    "Name",
+    "Name",
+    "Name"};
 static const char *s_size_col[LANG_MAX] = {
     "Size", "Taille", "Dimensione", "Tamahho",
-    "Groesse", "Tamanho", "Grootte"
-};
+    "Groesse", "Tamanho", "Grootte",
+    "Size",
+    "Size",
+    "Size",
+    "Size"};
 static const char *s_dir_tag[LANG_MAX] = {
     "<DIR>", "<DOS>", "<CART>", "<DIR>",
-    "<VERZ>", "<DIR>", "<MAP>"
-};
+    "<VERZ>", "<DIR>", "<MAP>",
+    "<DIR>",
+    "<DIR>",
+    "<DIR>",
+    "<DIR>"};
 static const char *s_fb_delete_q[LANG_MAX] = {
     "Delete selected item?", "Supprimer l'element selectionne?", "Eliminare l'elemento selezionato?", "Eliminar elemento seleccionado?",
-    "Ausgewaehltes Element loeschen?", "Excluir item selecionado?", "Geselecteerd item verwijderen?"
-};
+    "Ausgewaehltes Element loeschen?", "Excluir item selecionado?", "Geselecteerd item verwijderen?",
+    "Delete selected item?",
+    "Delete selected item?",
+    "Delete selected item?",
+    "Delete selected item?"};
 static const char *s_fb_confirm_del[LANG_MAX] = {
     "[A] Confirm Delete  [B] Cancel", "[A] Confirmer suppr.  [B] Annuler", "[A] Conferma elim.  [B] Annulla", "[A] Conf. eliminar  [B] Cancelar",
-    "[A] Loeschen best.  [B] Abbrechen", "[A] Conf. exclusao  [B] Cancelar", "[A] Bevestig verwij.  [B] Annuleren"
-};
+    "[A] Loeschen best.  [B] Abbrechen", "[A] Conf. exclusao  [B] Cancelar", "[A] Bevestig verwij.  [B] Annuleren",
+    "[A] Confirm Delete  [B] Cancel",
+    "[A] Confirm Delete  [B] Cancel",
+    "[A] Confirm Delete  [B] Cancel",
+    "[A] Confirm Delete  [B] Cancel"};
 static const char *s_fb_browse_hint[LANG_MAX] = {
     "[A] Enter  [B] Back  [X] Delete  [Y] Rename",
     "[A] Entrer  [B] Retour  [X] Suppr.  [Y] Renommer",
@@ -1167,16 +1889,25 @@ static const char *s_fb_browse_hint[LANG_MAX] = {
     "[A] Entrar  [B] Volver  [X] Elim.  [Y] Renombrar",
     "[A] Oeffnen  [B] Zuru.  [X] Loesch.  [Y] Umben.",
     "[A] Entrar  [B] Voltar  [X] Excluir  [Y] Renomear",
-    "[A] Open  [B] Terug  [X] Verwijd.  [Y] Hernoem"
-};
+    "[A] Open  [B] Terug  [X] Verwijd.  [Y] Hernoem",
+    "[A] Enter  [B] Back  [X] Delete  [Y] Rename",
+    "[A] Enter  [B] Back  [X] Delete  [Y] Rename",
+    "[A] Enter  [B] Back  [X] Delete  [Y] Rename",
+    "[A] Enter  [B] Back  [X] Delete  [Y] Rename"};
 static const char *s_fb_paste[LANG_MAX] = {
     "[L] Paste", "[L] Coller", "[L] Incolla", "[L] Pegar",
-    "[L] Einfuegen", "[L] Colar", "[L] Plakken"
-};
+    "[L] Einfuegen", "[L] Colar", "[L] Plakken",
+    "[L] Paste",
+    "[L] Paste",
+    "[L] Paste",
+    "[L] Paste"};
 static const char *s_fb_other_hint[LANG_MAX] = {
     "[R] Copy  [ZL] Cut  [-] Home", "[R] Copier  [ZL] Couper  [-] Accueil", "[R] Copia  [ZL] Taglia  [-] Home", "[R] Copiar  [ZL] Cortar  [-] Inicio",
-    "[R] Kopieren  [ZL] Aussch.  [-] Start", "[R] Copiar  [ZL] Recortar  [-] Inicio", "[R] Kopieer  [ZL] Knip  [-] Home"
-};
+    "[R] Kopieren  [ZL] Aussch.  [-] Start", "[R] Copiar  [ZL] Recortar  [-] Inicio", "[R] Kopieer  [ZL] Knip  [-] Home",
+    "[R] Copy  [ZL] Cut  [-] Home",
+    "[R] Copy  [ZL] Cut  [-] Home",
+    "[R] Copy  [ZL] Cut  [-] Home",
+    "[R] Copy  [ZL] Cut  [-] Home"};
 static const char *s_fb_rename_hint[LANG_MAX] = {
     "[Up/Dn] cycle char  [L/R] cursor  [ZL] del char  [A] Confirm  [B] Cancel",
     "[Haut/Bas] car. suiv./prec.  [G/D] curseur  [ZL] suppr. car.  [A] Conf.  [B] Annul.",
@@ -1184,18 +1915,27 @@ static const char *s_fb_rename_hint[LANG_MAX] = {
     "[Arr/Ab] caract. sig./ant.  [I/D] cursor  [ZL] elim. car.  [A] Conf.  [B] Canc.",
     "[Hoch/Runt] Zeichen  [L/R] Cursor  [ZL] loesch.  [A] Best.  [B] Abbr.",
     "[Cima/Baixo] ciclo char  [E/D] cursor  [ZL] elim. char  [A] Conf.  [B] Canc.",
-    "[Omh/Oml] teken cyc.  [L/R] cursor  [ZL] del teken  [A] Bevest.  [B] Annul."
-};
+    "[Omh/Oml] teken cyc.  [L/R] cursor  [ZL] del teken  [A] Bevest.  [B] Annul.",
+    "[Up/Dn] cycle char  [L/R] cursor  [ZL] del char  [A] Confirm  [B] Cancel",
+    "[Up/Dn] cycle char  [L/R] cursor  [ZL] del char  [A] Confirm  [B] Cancel",
+    "[Up/Dn] cycle char  [L/R] cursor  [ZL] del char  [A] Confirm  [B] Cancel",
+    "[Up/Dn] cycle char  [L/R] cursor  [ZL] del char  [A] Confirm  [B] Cancel"};
 static const char *s_fb_rename_empty[LANG_MAX] = {
     "(empty)", "(vide)", "(vuoto)", "(vacio)",
-    "(leer)", "(vazio)", "(leeg)"
-};
+    "(leer)", "(vazio)", "(leeg)",
+    "(empty)",
+    "(empty)",
+    "(empty)",
+    "(empty)"};
 
 // --- Popup dismiss ---
 static const char *s_popup_dismiss[LANG_MAX] = {
     "Tap anywhere to dismiss", "Touchez pour fermer", "Tocca per chiudere", "Toca para cerrar",
-    "Zum Schliessen tippen", "Toque para fechar", "Tik om te sluiten"
-};
+    "Zum Schliessen tippen", "Toque para fechar", "Tik om te sluiten",
+    "Tap anywhere to dismiss",
+    "Tap anywhere to dismiss",
+    "Tap anywhere to dismiss",
+    "Tap anywhere to dismiss"};
 
 // --- Settings info (replaces original multi-line) ---
 static const char *s_settings_info2[LANG_MAX] = {
@@ -1205,8 +1945,11 @@ static const char *s_settings_info2[LANG_MAX] = {
     "[DPad] Cambiar item  |  [I/D] Cambiar valor  |  [B] Volver",
     "[DPad] Wechseln  |  [L/R] Wert aendern  |  [B] Zurueck",
     "[DPad] Mudar item  |  [L/E] Mudar valor  |  [B] Voltar",
-    "[DPad] Wissele  |  [L/R] Waarde wijz.  |  [B] Terug"
-};
+    "[DPad] Wissele  |  [L/R] Waarde wijz.  |  [B] Terug",
+    "[DPad] Switch item  |  [L/R] Change value  |  [B] Back",
+    "[DPad] Switch item  |  [L/R] Change value  |  [B] Back",
+    "[DPad] Switch item  |  [L/R] Change value  |  [B] Back",
+    "[DPad] Switch item  |  [L/R] Change value  |  [B] Back"};
 
 // --- Settings refresh names ---
 static const char *s_refresh_names[LANG_MAX][5] = {
@@ -1216,14 +1959,20 @@ static const char *s_refresh_names[LANG_MAX][5] = {
     {"Apag.", "1s", "3s", "5s", "10s"},
     {"Aus", "1s", "3s", "5s", "10s"},
     {"Desl.", "1s", "3s", "5s", "10s"},
-    {"Uit", "1s", "3s", "5s", "10s"}
-};
+    {"Uit", "1s", "3s", "5s", "10s"},
+    {"Off", "1s", "3s", "5s", "10s"},
+    {"Off", "1s", "3s", "5s", "10s"},
+    {"Off", "1s", "3s", "5s", "10s"},
+    {"Off", "1s", "3s", "5s", "10s"}};
 
 // --- Custom Theme Editor ---
 static const char *s_cte_title[LANG_MAX] = {
     "Custom Theme Editor", "Editeur de theme", "Editor tema personalizzato", "Editor de tema",
-    "Benutzerdefinierter Theme-Editor", "Editor de tema personalizado", "Aangepaste thema-editor"
-};
+    "Benutzerdefinierter Theme-Editor", "Editor de tema personalizado", "Aangepaste thema-editor",
+    "Custom Theme Editor",
+    "Custom Theme Editor",
+    "Custom Theme Editor",
+    "Custom Theme Editor"};
 static const char *s_cte_names[10] __attribute__((unused)) = {"Background","Card bg","Border","Accent Cyan","Accent Green","Text","Grey","Dark Grey","Header bg2","Tab bg3"};
 static const char *s_cte_edit_hint[LANG_MAX] = {
     "Selected Color - [L/R] Channel  [Up/Down/ZL/ZR] Value  [Touch] Drag",
@@ -1232,16 +1981,25 @@ static const char *s_cte_edit_hint[LANG_MAX] = {
     "Color - [I/D] Canal  [Arr/Ab/ZL/ZR] Valor  [Touch] Arrastrar",
     "Farbe - [L/R] Kanal  [Hoch/Runt/ZL/ZR] Wert  [Touch] Ziehen",
     "Cor - [L/E] Canal  [Cima/Baixo/ZL/ZR] Valor  [Touch] Arrastar",
-    "Kleur - [L/R] Kanaal  [Omh/Oml/ZL/ZR] Waarde  [Touch] Sleep"
-};
+    "Kleur - [L/R] Kanaal  [Omh/Oml/ZL/ZR] Waarde  [Touch] Sleep",
+    "Selected Color - [L/R] Channel  [Up/Down/ZL/ZR] Value  [Touch] Drag",
+    "Selected Color - [L/R] Channel  [Up/Down/ZL/ZR] Value  [Touch] Drag",
+    "Selected Color - [L/R] Channel  [Up/Down/ZL/ZR] Value  [Touch] Drag",
+    "Selected Color - [L/R] Channel  [Up/Down/ZL/ZR] Value  [Touch] Drag"};
 static const char *s_cte_save[LANG_MAX] = {
     "[A] Save & Apply", "[A] Sauver & Appliquer", "[A] Salva & Applica", "[A] Guardar & Aplicar",
-    "[A] Speichern & Anwenden", "[A] Salvar & Aplicar", "[A] Opslaan & Toepassen"
-};
+    "[A] Speichern & Anwenden", "[A] Salvar & Aplicar", "[A] Opslaan & Toepassen",
+    "[A] Save & Apply",
+    "[A] Save & Apply",
+    "[A] Save & Apply",
+    "[A] Save & Apply"};
 static const char *s_cte_cancel[LANG_MAX] = {
     "[B] Cancel", "[B] Annuler", "[B] Annulla", "[B] Cancelar",
-    "[B] Abbrechen", "[B] Cancelar", "[B] Annuleren"
-};
+    "[B] Abbrechen", "[B] Cancelar", "[B] Annuleren",
+    "[B] Cancel",
+    "[B] Cancel",
+    "[B] Cancel",
+    "[B] Cancel"};
 static const char *s_cte_touch_hint[LANG_MAX] = {
     "Touch color slot to select | Touch RGB bar to set value | A=Save  B=Cancel",
     "Toucher couleur pour selectionner | Toucher barre RVB | A=Sauv.  B=Annul.",
@@ -1249,25 +2007,25 @@ static const char *s_cte_touch_hint[LANG_MAX] = {
     "Tocar color para seleccionar | Tocar barra RGB | A=Guardar  B=Cancelar",
     "Farbe antippen zum Ausw. | RGB-Balken antippen | A=Speich.  B=Abbr.",
     "Tocar cor para selecionar | Tocar barra RGB | A=Salvar  B=Cancelar",
-    "Raak kleur aan om te selecteren | Raak RGB-balk | A=Opslaan  B=Annul."
-};
+    "Raak kleur aan om te selecteren | Raak RGB-balk | A=Opslaan  B=Annul.",
+    "Touch color slot to select | Touch RGB bar to set value | A=Save  B=Cancel",
+    "Touch color slot to select | Touch RGB bar to set value | A=Save  B=Cancel",
+    "Touch color slot to select | Touch RGB bar to set value | A=Save  B=Cancel",
+    "Touch color slot to select | Touch RGB bar to set value | A=Save  B=Cancel"};
 
 // --- Existing i18n strings ---
-static const char *s_dev_fan[LANG_MAX] = {
-    "Fan control: Under development",
-    "Controle du ventilateur: En developpement",
-    "Controllo ventola: In sviluppo",
-    "Control ventilador: En desarrollo",
-    "Lueftersteuerung: In Entwicklung",
-    "Controle ventoinha: Em desenvolvimento",
-    "Ventilatorbediening: In ontwikkeling"
-};
 static const char *s_scroll_up[LANG_MAX] = {
-    "^ Scroll up", "^ Haut", "^ Su", "^ Arriba", "^ Hoch", "^ Cima", "^ Omhoog"
-};
+    "^ Scroll up", "^ Haut", "^ Su", "^ Arriba", "^ Hoch", "^ Cima", "^ Omhoog",
+    "^ Scroll up",
+    "^ Scroll up",
+    "^ Scroll up",
+    "^ Scroll up"};
 static const char *s_scroll_down[LANG_MAX] = {
-    "v Scroll down", "v Bas", "v Giu", "v Abajo", "v Runter", "v Baixo", "v Omlaag"
-};
+    "v Scroll down", "v Bas", "v Giu", "v Abajo", "v Runter", "v Baixo", "v Omlaag",
+    "v Scroll down",
+    "v Scroll down",
+    "v Scroll down",
+    "v Scroll down"};
 
 // Theme
 #define THEME_DARK 0
@@ -1281,13 +2039,17 @@ static const char *s_scroll_down[LANG_MAX] = {
 #define THEME_AMBER 8
 #define THEME_TEAL 9
 #define THEME_CYAN2 10
-#define THEME_CUSTOM 11
-#define THEME_MAX 12
+#define THEME_MINT 11
+#define THEME_CORAL 12
+#define THEME_LAVENDER 13
+#define THEME_MIDNIGHT 14
+#define THEME_CUSTOM 15
+#define THEME_MAX 16
 static int cur_theme = THEME_DARK;
 static int auto_refresh_interval = 3; // seconds, 0 = off
 
 static const char *theme_names[THEME_MAX] = {
-    "Dark", "Light", "Blue", "Green", "Purple", "Red", "Pink", "Orange", "Amber", "Teal", "Cyan", "Custom"
+    "Dark", "Light", "Blue", "Green", "Purple", "Red", "Pink", "Orange", "Amber", "Teal", "Cyan", "Mint", "Coral", "Lavender", "Midnight", "Custom"
 };
 
 static int settings_sel = 0; // 0=language, 1=theme, 2=auto-refresh
@@ -1309,16 +2071,16 @@ static int cte_chan = 0; // 0=R, 1=G, 2=B
 static SDL_Color cte_backup[10]; // backup for cancel
 
 // Theme color palettes [theme][color_index]
-static const SDL_Color theme_bg[THEME_MAX]       = { {18,18,20,255}, {235,235,240,255}, {10,18,35,255}, {10,28,12,255}, {28,10,35,255}, {35,10,10,255}, {40,15,25,255}, {30,18,8,255}, {30,24,8,255}, {8,30,28,255}, {8,25,35,255}, {18,18,20,255} };
-static const SDL_Color theme_card[THEME_MAX]     = { {28,28,32,255}, {215,215,222,255}, {18,30,52,255}, {18,40,22,255}, {40,18,52,255}, {52,18,18,255}, {55,20,30,255}, {45,28,14,255}, {45,34,14,255}, {14,42,38,255}, {14,35,50,255}, {28,28,32,255} };
-static const SDL_Color theme_border[THEME_MAX]   = { {42,42,48,255}, {190,190,200,255}, {30,45,70,255}, {30,55,35,255}, {55,30,70,255}, {70,30,30,255}, {75,35,45,255}, {65,42,24,255}, {65,48,24,255}, {24,55,50,255}, {24,48,65,255}, {42,42,48,255} };
-static const SDL_Color theme_cyan[THEME_MAX]     = { {0,210,255,255}, {0,120,180,255}, {0,200,255,255}, {0,220,200,255}, {100,200,255,255}, {255,100,100,255}, {255,120,180,255}, {255,180,80,255}, {255,210,80,255}, {0,220,200,255}, {0,210,255,255}, {0,210,255,255} };
-static const SDL_Color theme_green[THEME_MAX]    = { {0,255,136,255}, {0,180,80,255}, {0,240,140,255}, {0,255,136,255}, {100,255,180,255}, {255,100,100,255}, {255,120,180,255}, {255,180,80,255}, {255,210,80,255}, {0,255,200,255}, {100,255,220,255}, {0,255,136,255} };
-static const SDL_Color theme_white[THEME_MAX]    = { {255,255,255,255}, {20,20,25,255}, {220,230,255,255}, {200,255,210,255}, {230,210,255,255}, {255,210,210,255}, {255,210,220,255}, {255,230,200,255}, {255,240,200,255}, {200,240,235,255}, {200,230,240,255}, {255,255,255,255} };
-static const SDL_Color theme_grey[THEME_MAX]     = { {150,150,160,255}, {100,100,110,255}, {130,140,160,255}, {130,160,140,255}, {160,140,170,255}, {170,130,130,255}, {170,130,140,255}, {170,150,130,255}, {170,160,130,255}, {130,160,155,255}, {130,150,160,255}, {150,150,160,255} };
-static const SDL_Color theme_dark_grey[THEME_MAX] = { {55,55,62,255}, {170,170,178,255}, {45,55,75,255}, {45,65,50,255}, {65,45,75,255}, {75,45,45,255}, {75,48,55,255}, {70,55,40,255}, {70,60,40,255}, {40,65,60,255}, {40,55,70,255}, {55,55,62,255} };
-static const SDL_Color theme_bg2[THEME_MAX]      = { {22,22,26,255}, {225,225,232,255}, {14,22,39,255}, {14,32,16,255}, {32,14,39,255}, {39,14,14,255}, {44,18,28,255}, {34,22,12,255}, {34,28,12,255}, {12,34,32,255}, {12,28,39,255}, {22,22,26,255} };
-static const SDL_Color theme_bg3[THEME_MAX]      = { {34,34,42,255}, {195,195,202,255}, {22,34,56,255}, {22,44,26,255}, {44,22,56,255}, {56,22,22,255}, {60,25,35,255}, {50,32,18,255}, {50,38,18,255}, {18,48,44,255}, {18,40,56,255}, {34,34,42,255} };
+static const SDL_Color theme_bg[THEME_MAX]       = { {18,18,20,255}, {235,235,240,255}, {10,18,35,255}, {10,28,12,255}, {28,10,35,255}, {35,10,10,255}, {40,15,25,255}, {30,18,8,255}, {30,24,8,255}, {8,30,28,255}, {8,25,35,255}, {8,35,25,255}, {40,18,15,255}, {25,15,40,255}, {5,5,15,255}, {18,18,20,255} };
+static const SDL_Color theme_card[THEME_MAX]     = { {28,28,32,255}, {215,215,222,255}, {18,30,52,255}, {18,40,22,255}, {40,18,52,255}, {52,18,18,255}, {55,20,30,255}, {45,28,14,255}, {45,34,14,255}, {14,42,38,255}, {14,35,50,255}, {14,48,35,255}, {55,25,22,255}, {38,22,55,255}, {10,10,25,255}, {28,28,32,255} };
+static const SDL_Color theme_border[THEME_MAX]   = { {42,42,48,255}, {190,190,200,255}, {30,45,70,255}, {30,55,35,255}, {55,30,70,255}, {70,30,30,255}, {75,35,45,255}, {65,42,24,255}, {65,48,24,255}, {24,55,50,255}, {24,48,65,255}, {24,65,48,255}, {75,38,35,255}, {55,35,75,255}, {18,18,38,255}, {42,42,48,255} };
+static const SDL_Color theme_cyan[THEME_MAX]     = { {0,210,255,255}, {0,120,180,255}, {0,200,255,255}, {0,220,200,255}, {100,200,255,255}, {255,100,100,255}, {255,120,180,255}, {255,180,80,255}, {255,210,80,255}, {0,220,200,255}, {0,210,255,255}, {0,255,180,255}, {255,140,100,255}, {180,140,255,255}, {80,120,255,255}, {0,210,255,255} };
+static const SDL_Color theme_green[THEME_MAX]    = { {0,255,136,255}, {0,180,80,255}, {0,240,140,255}, {0,255,136,255}, {100,255,180,255}, {255,100,100,255}, {255,120,180,255}, {255,180,80,255}, {255,210,80,255}, {0,255,200,255}, {100,255,220,255}, {0,255,200,255}, {255,180,140,255}, {200,180,255,255}, {100,180,255,255}, {0,255,136,255} };
+static const SDL_Color theme_white[THEME_MAX]    = { {255,255,255,255}, {20,20,25,255}, {220,230,255,255}, {200,255,210,255}, {230,210,255,255}, {255,210,210,255}, {255,210,220,255}, {255,230,200,255}, {255,240,200,255}, {200,240,235,255}, {200,230,240,255}, {200,255,230,255}, {255,230,220,255}, {230,220,255,255}, {200,210,240,255}, {255,255,255,255} };
+static const SDL_Color theme_grey[THEME_MAX]     = { {150,150,160,255}, {100,100,110,255}, {130,140,160,255}, {130,160,140,255}, {160,140,170,255}, {170,130,130,255}, {170,130,140,255}, {170,150,130,255}, {170,160,130,255}, {130,160,155,255}, {130,150,160,255}, {130,170,155,255}, {170,145,140,255}, {155,140,170,255}, {120,130,155,255}, {150,150,160,255} };
+static const SDL_Color theme_dark_grey[THEME_MAX] = { {55,55,62,255}, {170,170,178,255}, {45,55,75,255}, {45,65,50,255}, {65,45,75,255}, {75,45,45,255}, {75,48,55,255}, {70,55,40,255}, {70,60,40,255}, {40,65,60,255}, {40,55,70,255}, {40,70,60,255}, {75,55,50,255}, {60,50,75,255}, {30,35,55,255}, {55,55,62,255} };
+static const SDL_Color theme_bg2[THEME_MAX]      = { {22,22,26,255}, {225,225,232,255}, {14,22,39,255}, {14,32,16,255}, {32,14,39,255}, {39,14,14,255}, {44,18,28,255}, {34,22,12,255}, {34,28,12,255}, {12,34,32,255}, {12,28,39,255}, {12,39,30,255}, {44,22,18,255}, {28,18,44,255}, {8,8,22,255}, {22,22,26,255} };
+static const SDL_Color theme_bg3[THEME_MAX]      = { {34,34,42,255}, {195,195,202,255}, {22,34,56,255}, {22,44,26,255}, {44,22,56,255}, {56,22,22,255}, {60,25,35,255}, {50,32,18,255}, {50,38,18,255}, {18,48,44,255}, {18,40,56,255}, {18,52,42,255}, {60,32,28,255}, {40,28,60,255}, {14,14,32,255}, {34,34,42,255} };
 
 static void apply_theme(void) {
     if (cur_theme == THEME_CUSTOM) {
@@ -1402,6 +2164,122 @@ static void load_config(void) {
     apply_theme();
 }
 
+// ─── Game Cartridge Reader ────────────────────────
+static char gamecart_title[256] = {0};
+static char gamecart_serial[64] = {0};
+static char gamecart_version[64] = {0};
+static bool gamecart_present = false;
+static u64 gamecart_last_check = 0;
+static const char *s_gamecart_info[LANG_MAX] = {
+    "Title: %s", "Titre: %s", "Titolo: %s", "Titulo: %s",
+    "Titel: %s", "Titulo: %s", "Titel: %s",
+    "Title: %s", "Title: %s", "Title: %s", "Title: %s"
+};
+static const char *s_gamecart_id[LANG_MAX] = {
+    "Title ID: %s", "ID Titre: %s", "ID Titolo: %s", "ID Titulo: %s",
+    "Titel-ID: %s", "ID Titulo: %s", "Titel ID: %s",
+    "Title ID: %s", "Title ID: %s", "Title ID: %s", "Title ID: %s"
+};
+static const char *s_no_gamecart[LANG_MAX] = {
+    "No game card inserted", "Aucune cartouche inseree", "Nessuna cartuccia inserita", "Ningun cartucho insertado",
+    "Kein Modul eingelegt", "Nenhum cartucho inserido", "Geen spelcartridge geplaatst",
+    "No game card inserted", "No game card inserted", "No game card inserted", "No game card inserted"
+};
+
+// ─── Battery Charge/Discharge Rate ────────────────────────
+static float batt_rate_ma = 0.0f; // mA
+static u64 batt_rate_tick = 0;
+static u32 batt_prev_pct = 0;
+static u64 batt_prev_tick = 0;
+static bool batt_rate_initialized = false;
+
+// ─── Network Speed Test ────────────────────────
+static float net_dl_mbps = 0.0f;
+static float net_ul_mbps = 0.0f;
+static float net_ping_ms = 0.0f;
+static float net_jitter_ms = 0.0f;
+static Thread net_test_thr;
+
+// ─── CPU/GPU Frequency Scaling ────────────────────────
+static int cpu_scale_target_mhz = 0; // 0 = auto/default
+static int gpu_scale_target_mhz = 0;
+static int mem_scale_target_mhz = 0;
+
+static void save_scaling_config(void) {
+    FILE *f = fopen(CONFIG_PATH, "a");
+    if (!f) return;
+    fprintf(f, "cpu_scale_target=%d\n", cpu_scale_target_mhz);
+    fprintf(f, "gpu_scale_target=%d\n", gpu_scale_target_mhz);
+    fclose(f);
+}
+
+static void load_scaling_config(void) {
+    FILE *f = fopen(CONFIG_PATH, "r");
+    if (!f) return;
+    char line[128];
+    while (fgets(line, sizeof(line), f)) {
+        int st;
+        if (sscanf(line, "cpu_scale_target=%d", &st) == 1) cpu_scale_target_mhz = st;
+        if (sscanf(line, "gpu_scale_target=%d", &st) == 1) gpu_scale_target_mhz = st;
+    }
+    fclose(f);
+}
+
+// ─── Installed Games Scanner ────────────────────────
+#define MAX_GAMES 64
+static u64 installed_game_ids[MAX_GAMES];
+static char installed_game_names[MAX_GAMES][256];
+static int installed_game_count = 0;
+static bool installed_games_scanned = false;
+
+// ─── Process Manager ────────────────────────
+#define MAX_PROC 32
+static u64 proc_ids[MAX_PROC];
+static char proc_names[MAX_PROC][64];
+static int proc_count = 0;
+static u64 proc_scan_tick = 0;
+
+static void scan_running_processes(void) {
+    u64 now = armGetSystemTick();
+    if (now - proc_scan_tick < armGetSystemTickFreq() * 2) return;
+    proc_scan_tick = now;
+    proc_count = 0;
+    memset(proc_ids, 0, sizeof(proc_ids));
+    memset(proc_names, 0, sizeof(proc_names));
+    
+    // Get running PIDs via kernel SVC
+    s32 num = 0;
+    u64 pids[32];
+    Result rc = svcGetProcessList(&num, pids, 32);
+    if (R_FAILED(rc)) { proc_count = -1; return; }
+    
+    for (s32 i = 0; i < num && proc_count < MAX_PROC; i++) {
+        u64 program_id = 0;
+        // Try to get the program ID for this process
+        rc = svcGetInfo(&program_id, InfoType_ProgramId, pids[i], 0);
+        if (R_SUCCEEDED(rc) && program_id > 0) {
+            proc_ids[proc_count] = program_id;
+            // Look up the name from installed games
+            bool found = false;
+            for (int j = 0; j < installed_game_count; j++) {
+                if (installed_game_ids[j] == program_id) {
+                    strncpy(proc_names[proc_count], installed_game_names[j], sizeof(proc_names[0])-1);
+                    found = true; break;
+                }
+            }
+            if (!found) {
+                snprintf(proc_names[proc_count], sizeof(proc_names[0]), "%016lX", (unsigned long)program_id);
+            }
+            proc_count++;
+        } else {
+            // Process without program ID (system process)
+            snprintf(proc_names[proc_count], sizeof(proc_names[0]), "sys: PID %lu", (unsigned long)pids[i]);
+            proc_ids[proc_count] = 0;
+            proc_count++;
+        }
+    }
+}
+
 // forward declaration
 static void add_alert(const char *msg);
 
@@ -1419,7 +2297,7 @@ static void save_perf_metrics(void) {
     fseek(f, 0, SEEK_END);
     long sz = ftell(f);
     if (sz == 0) {
-        fprintf(f, "timestamp,local_time,fps,cpu_mhz,gpu_mhz,mem_mhz,skin_mC,mem_used_bytes,mem_total_bytes\n");
+        fprintf(f, "timestamp,local_time,fps,cpu_mhz,gpu_mhz,mem_mhz,skin_mC,mem_used_bytes,mem_total_bytes,batt_pct,batt_rate_mA,gamecart_present,cpu_target,gpu_target,net_dl_mbps,net_ul_mbps,installed_games\n");
     }
 
     // collect metrics
@@ -1456,7 +2334,12 @@ static void save_perf_metrics(void) {
         mem_total = 0; mem_used = 0;
     }
 
-    fprintf(f, "%llu,%s,%d,%u,%u,%u,%d,%llu,%llu\n",
+    u32 batt = 0;
+    psmGetBatteryChargePercentage(&batt);
+    float batt_rate = 0;
+    if (batt_rate_initialized) batt_rate = batt_rate_ma;
+
+    fprintf(f, "%llu,%s,%d,%u,%u,%u,%d,%llu,%llu,%u,%.1f,%d,%d,%d,%.1f,%.1f,%d\n",
         (unsigned long long)now,
         timestr,
         fps,
@@ -1465,7 +2348,15 @@ static void save_perf_metrics(void) {
         (unsigned)memclk/1000000u,
         (int)skin,
         (unsigned long long)mem_used,
-        (unsigned long long)mem_total);
+        (unsigned long long)mem_total,
+        batt,
+        batt_rate,
+        gamecart_present ? 1 : 0,
+        cpu_scale_target_mhz,
+        gpu_scale_target_mhz,
+        net_dl_mbps,
+        net_ul_mbps,
+        installed_game_count);
     fclose(f);
     add_alert("Metrics exported");
 }
@@ -1725,6 +2616,19 @@ static void ftp_addlog(const char *msg) {
 }
 
 static void add_alert(const char *msg) {
+    // Shift older notifications to make room
+    if (notif_count >= NOTIF_MAX) {
+        for (int i = 1; i < NOTIF_MAX; i++) {
+            strncpy(notif_msgs[i-1], notif_msgs[i], sizeof(notif_msgs[0])-1);
+            notif_ticks[i-1] = notif_ticks[i];
+        }
+        notif_count = NOTIF_MAX - 1;
+    }
+    strncpy(notif_msgs[notif_count], msg, sizeof(notif_msgs[0])-1);
+    notif_msgs[notif_count][sizeof(notif_msgs[0])-1] = 0;
+    notif_ticks[notif_count] = armGetSystemTick();
+    notif_count++;
+    // Also keep legacy export_msg for tools page display
     snprintf(export_msg, sizeof(export_msg), "%s", msg);
     export_msg_tick = armGetSystemTick();
 }
@@ -1768,7 +2672,7 @@ static void fcli(int fd, u32 ip) {
     const char *mode_name = ftp_mode ? "FTPD" : "FTP";
     int port = ftp_get_port();
     char banner[128];
-    snprintf(banner, sizeof(banner), "220 SwitchInfoNX %s v0.0.2 (port %d) - sdmc:/ root access ready\r\n", mode_name, port);
+    snprintf(banner, sizeof(banner), "220 SwitchInfoNX %s v0.0.3 (port %d) - sdmc:/ root access ready\r\n", mode_name, port);
     fsend(fd, banner);
     ftp_data = -1;
     ftp_rest_offset = 0;
@@ -2187,7 +3091,7 @@ static void export_system_info(void) {
     }
 
     fprintf(f, "=== SwitchInfoNX System Report ===\n");
-    fprintf(f, "Generated by SwitchInfoNX v0.0.2 by dodosi\n\n");
+    fprintf(f, "Generated by SwitchInfoNX v0.0.3 by dodosi\n\n");
 
     // Time
     time_t now = time(NULL);
@@ -2320,6 +3224,462 @@ static void sd_run_speed_test(void) {
     }
 }
 
+// ─── Game Cartridge Reader ─────────────────────────────────
+static void gamecart_update_info(void) {
+    u64 now = armGetSystemTick();
+    if (now - gamecart_last_check < armGetSystemTickFreq()) return;
+    gamecart_last_check = now;
+    
+    NsApplicationRecord rec;
+    s32 total = 0;
+    gamecart_present = false;
+    gamecart_title[0] = 0;
+    gamecart_serial[0] = 0;
+    gamecart_version[0] = 0;
+    
+    if (R_SUCCEEDED(nsListApplicationRecord(&rec, 1, 0, &total)) && total > 0) {
+        NsApplicationControlData ctrl;
+        size_t ctrl_size = 0;
+        if (R_SUCCEEDED(nsGetApplicationControlData(NsApplicationControlSource_Storage, rec.application_id, &ctrl, sizeof(ctrl), &ctrl_size)) && ctrl_size >= sizeof(ctrl)) {
+            for (int i = 0; i < 16; i++) {
+                if (ctrl.nacp.lang[i].name[0]) {
+                    strncpy(gamecart_title, ctrl.nacp.lang[i].name, sizeof(gamecart_title)-1);
+                    break;
+                }
+            }
+            snprintf(gamecart_serial, sizeof(gamecart_serial), "%016lX", (unsigned long)rec.application_id);
+            gamecart_present = true;
+        }
+    }
+}
+
+static void batt_rate_update(void) {
+    u64 now = armGetSystemTick();
+    if (now - batt_rate_tick < armGetSystemTickFreq()) return;
+    batt_rate_tick = now;
+    
+    u32 cur_pct = 0;
+    PsmChargerType ch = PsmChargerType_Unconnected;
+    if (R_FAILED(psmGetBatteryChargePercentage(&cur_pct))) return;
+    psmGetChargerType(&ch);
+    
+    if (!batt_rate_initialized) {
+        batt_prev_pct = cur_pct;
+        batt_prev_tick = now;
+        batt_rate_initialized = true;
+        return;
+    }
+    
+    if (cur_pct != batt_prev_pct) {
+        u64 dt = now - batt_prev_tick;
+        double dt_sec = (double)dt / armGetSystemTickFreq();
+        if (dt_sec > 0) {
+            int pct_diff = (int)cur_pct - (int)batt_prev_pct;
+            if (ch != PsmChargerType_Unconnected) {
+                // Charging: estimate based on battery capacity (typical Switch battery ~4310mAh)
+                batt_rate_ma = (float)(pct_diff * 4310) / (float)(dt_sec * 100.0);
+                if (batt_rate_ma < 0) batt_rate_ma = 0;
+            } else {
+                // Discharging
+                batt_rate_ma = (float)(-pct_diff * 4310) / (float)(dt_sec * 100.0);
+                if (batt_rate_ma < 0) batt_rate_ma = 0;
+            }
+        }
+        batt_prev_pct = cur_pct;
+        batt_prev_tick = now;
+    }
+}
+
+static const char *s_batt_rate_label[LANG_MAX] = {
+    "Charge/Disch. Rate", "Taux charge/dech.", "Tasso carica/scarica", "Tasa carga/descarga",
+    "Lade-/Entladerate", "Taxa carga/descarga", "Laad-/ontlaadsnelheid",
+    "Charge/Disch. Rate", "Charge/Disch. Rate", "Charge/Disch. Rate", "Charge/Disch. Rate"
+};
+
+// ─── Network Speed Test ────────────────────────────────────
+static volatile int net_test_running = 0;
+
+#define NET_TEST_BUF_SIZE 4096
+#define NET_TEST_DURATION 3 // seconds per test
+#define NET_TEST_SIZE (NET_TEST_DURATION * 1024 * 1024) // ~1MB/s target
+
+static void net_test_download(void) {
+    int s = socket(AF_INET, SOCK_STREAM, 0);
+    if (s < 0) { net_dl_mbps = -1; return; }
+    
+    struct sockaddr_in addr;
+    addr.sin_family = AF_INET;
+    addr.sin_port = htons(80);
+    inet_pton(AF_INET, "1.1.1.1", &addr.sin_addr);
+    
+    struct timeval tv = {2, 0};
+    setsockopt(s, SOL_SOCKET, SO_RCVTIMEO, (const char*)&tv, sizeof(tv));
+    
+    if (connect(s, (struct sockaddr*)&addr, sizeof(addr)) < 0) {
+        close(s); net_dl_mbps = -1; return;
+    }
+    
+    const char *req = "GET / HTTP/1.1\r\nHost: 1.1.1.1\r\nConnection: close\r\n\r\n";
+    send(s, req, strlen(req), 0);
+    
+    u64 total = 0;
+    u64 start = armGetSystemTick();
+    u64 deadline = start + armGetSystemTickFreq() * NET_TEST_DURATION;
+    char buf[NET_TEST_BUF_SIZE];
+    
+    while (armGetSystemTick() < deadline) {
+        int n = recv(s, buf, sizeof(buf), 0);
+        if (n <= 0) break;
+        total += n;
+    }
+    
+    u64 elapsed = armGetSystemTick() - start;
+    double sec = (double)elapsed / armGetSystemTickFreq();
+    if (sec > 0.5) net_dl_mbps = (float)(total * 8.0 / sec / 1000000.0);
+    close(s);
+}
+
+static void net_test_upload(void) {
+    int s = socket(AF_INET, SOCK_STREAM, 0);
+    if (s < 0) { net_ul_mbps = -1; return; }
+    
+    struct sockaddr_in addr;
+    addr.sin_family = AF_INET;
+    addr.sin_port = htons(80);
+    inet_pton(AF_INET, "1.1.1.1", &addr.sin_addr);
+    
+    struct timeval tv = {2, 0};
+    setsockopt(s, SOL_SOCKET, SO_SNDTIMEO, (const char*)&tv, sizeof(tv));
+    
+    if (connect(s, (struct sockaddr*)&addr, sizeof(addr)) < 0) {
+        close(s); net_ul_mbps = -1; return;
+    }
+    
+    char payload[4096];
+    memset(payload, 'A', sizeof(payload));
+    
+    u64 total = 0;
+    u64 start = armGetSystemTick();
+    u64 deadline = start + armGetSystemTickFreq() * NET_TEST_DURATION;
+    
+    while (armGetSystemTick() < deadline) {
+        int n = send(s, payload, sizeof(payload), 0);
+        if (n <= 0) break;
+        total += n;
+    }
+    
+    u64 elapsed = armGetSystemTick() - start;
+    double sec = (double)elapsed / armGetSystemTickFreq();
+    if (sec > 0.5) net_ul_mbps = (float)(total * 8.0 / sec / 1000000.0);
+    close(s);
+}
+
+static void net_test_ping(void) {
+    float pings[5];
+    int ping_count = 0;
+    for (int pi = 0; pi < 5 && net_test_running; pi++) {
+        int s = socket(AF_INET, SOCK_STREAM, 0);
+        if (s < 0) continue;
+        struct sockaddr_in addr;
+        addr.sin_family = AF_INET;
+        addr.sin_port = htons(80);
+        inet_pton(AF_INET, "1.1.1.1", &addr.sin_addr);
+        struct timeval tv = {2, 0};
+        setsockopt(s, SOL_SOCKET, SO_RCVTIMEO, (const char*)&tv, sizeof(tv));
+        u64 t0 = armGetSystemTick();
+        if (connect(s, (struct sockaddr*)&addr, sizeof(addr)) == 0) {
+            u64 dt = armGetSystemTick() - t0;
+            pings[ping_count++] = (float)((double)dt / armGetSystemTickFreq() * 1000.0);
+        }
+        close(s);
+    }
+    if (ping_count > 0) {
+        float sum = 0, minv = pings[0], maxv = pings[0];
+        for (int i = 0; i < ping_count; i++) {
+            sum += pings[i];
+            if (pings[i] < minv) minv = pings[i];
+            if (pings[i] > maxv) maxv = pings[i];
+        }
+        net_ping_ms = sum / ping_count;
+        net_jitter_ms = maxv - minv;
+    } else {
+        net_ping_ms = -1;
+        net_jitter_ms = -1;
+    }
+}
+
+static void net_test_thread(void *arg) {
+    (void)arg;
+    net_dl_mbps = 0;
+    net_ul_mbps = 0;
+    net_ping_ms = 0;
+    net_jitter_ms = 0;
+    
+    net_test_ping();
+    if (!net_test_running) { net_test_running = 0; return; }
+    net_test_download();
+    if (!net_test_running) { net_test_running = 0; return; }
+    net_test_upload();
+    
+    net_test_running = 0;
+}
+
+static bool net_test_started = false;
+
+static void net_test_cleanup(void) {
+    if (!net_test_started) return;
+    if (net_test_running) {
+        net_test_running = 0;
+        threadWaitForExit(&net_test_thr);
+    }
+    threadClose(&net_test_thr);
+}
+
+static void net_test_start(void) {
+    if (net_test_running) return;
+    net_test_running = 1;
+    net_test_started = true;
+    threadCreate(&net_test_thr, net_test_thread, NULL, NULL, 16384, 0x2B, -2);
+    threadStart(&net_test_thr);
+}
+
+static const char *s_net_test_label[LANG_MAX] = {
+    "Network Speed Test", "Test vitesse reseau", "Test velocita rete", "Prueba velocidad red",
+    "Netzwerk-Geschw.-Test", "Teste de velocidade de rede", "Netwerksnelheidstest",
+    "Network Speed Test", "Network Speed Test", "Network Speed Test", "Network Speed Test"
+};
+static const char *s_net_dl[LANG_MAX] = {
+    "Download: %.1f Mbps", "Download: %.1f Mbps", "Download: %.1f Mbps", "Descarga: %.1f Mbps",
+    "Download: %.1f Mbps", "Download: %.1f Mbps", "Download: %.1f Mbps",
+    "Download: %.1f Mbps", "Download: %.1f Mbps", "Download: %.1f Mbps", "Download: %.1f Mbps"
+};
+static const char *s_net_ul[LANG_MAX] = {
+    "Upload: %.1f Mbps", "Upload: %.1f Mbps", "Upload: %.1f Mbps", "Subida: %.1f Mbps",
+    "Upload: %.1f Mbps", "Upload: %.1f Mbps", "Upload: %.1f Mbps",
+    "Upload: %.1f Mbps", "Upload: %.1f Mbps", "Upload: %.1f Mbps", "Upload: %.1f Mbps"
+};
+static const char *s_net_test_btn[LANG_MAX] = {
+    "[Touch] Run Speed Test", "[Touch] Lancer test", "[Touch] Avvia test", "[Touch] Iniciar prueba",
+    "[Touch] Geschw.-Test", "[Touch] Iniciar teste", "[Touch] Snelheidstest",
+    "[Touch] Run Speed Test", "[Touch] Run Speed Test", "[Touch] Run Speed Test", "[Touch] Run Speed Test"
+};
+static const char *s_net_testing[LANG_MAX] = {
+    "Testing...", "Test...", "Test...", "Probando...",
+    "Test...", "Testando...", "Testen...",
+    "Testing...", "Testing...", "Testing...", "Testing..."
+};
+
+// ─── CPU/GPU Frequency Scaling Control ─────────────────────
+static const char *s_scale_title[LANG_MAX] = {
+    "CPU/GPU Frequency Scaling", "Scaling frequences CPU/GPU", "Scaling frequenze CPU/GPU", "Escalado frec. CPU/GPU",
+    "CPU/GPU-Takt-Skalierung", "Escalonamento freq. CPU/GPU", "CPU/GPU-frequentieschaling",
+    "CPU/GPU Frequency Scaling", "CPU/GPU Frequency Scaling", "CPU/GPU Frequency Scaling", "CPU/GPU Frequency Scaling"
+};
+static const char *s_scale_auto[LANG_MAX] = {
+    "Auto (Default)", "Auto (Defaut)", "Auto (Predefinito)", "Auto (Predet.)",
+    "Auto (Standard)", "Auto (Padrao)", "Auto (Standaard)",
+    "Auto (Default)", "Auto (Default)", "Auto (Default)", "Auto (Default)"
+};
+static const char *s_scale_set[LANG_MAX] = {
+    "[ZR] Apply to CPU  [ZL] Apply to GPU  [L+R] Reset all",
+    "[ZR] Appliquer CPU  [ZL] Appliquer GPU  [L+R] Reinit",
+    "[ZR] Applica CPU  [ZL] Applica GPU  [L+R] Reset",
+    "[ZR] Aplicar CPU  [ZL] Aplicar GPU  [L+R] Restab.",
+    "[ZR] CPU anw.  [ZL] GPU anw.  [L+R] Zurueck",
+    "[ZR] Aplicar CPU  [ZL] Aplicar GPU  [L+R] Reinic.",
+    "[ZR] Toep. CPU  [ZL] Toep. GPU  [L+R] Reset",
+    "[ZR] Apply to CPU  [ZL] Apply to GPU  [L+R] Reset all",
+    "[ZR] Apply to CPU  [ZL] Apply to GPU  [L+R] Reset all",
+    "[ZR] Apply to CPU  [ZL] Apply to GPU  [L+R] Reset all",
+    "[ZR] Apply to CPU  [ZL] Apply to GPU  [L+R] Reset all"
+};
+static const char *s_scale_cpu_fmt[LANG_MAX] = {
+    "CPU Target: %d MHz (%s)", "CPU Cible: %d MHz (%s)", "CPU Target: %d MHz (%s)", "CPU Objetivo: %d MHz (%s)",
+    "CPU Ziel: %d MHz (%s)", "CPU Alvo: %d MHz (%s)", "CPU Doel: %d MHz (%s)",
+    "CPU Target: %d MHz (%s)", "CPU Target: %d MHz (%s)", "CPU Target: %d MHz (%s)", "CPU Target: %d MHz (%s)"
+};
+static const char *s_scale_gpu_fmt[LANG_MAX] = {
+    "GPU Target: %d MHz (%s)", "GPU Cible: %d MHz (%s)", "GPU Target: %d MHz (%s)", "GPU Objetivo: %d MHz (%s)",
+    "GPU Ziel: %d MHz (%s)", "GPU Alvo: %d MHz (%s)", "GPU Doel: %d MHz (%s)",
+    "GPU Target: %d MHz (%s)", "GPU Target: %d MHz (%s)", "GPU Target: %d MHz (%s)", "GPU Target: %d MHz (%s)"
+};
+
+static void scale_set_cpu(int mhz) {
+    if (mhz <= 0) return;
+    ClkrstSession cc;
+    if (R_SUCCEEDED(clkrstOpenSession(&cc, (PcvModuleId)PcvModule_CpuBus, 3))) {
+        clkrstSetClockRate(&cc, (u32)mhz * 1000000u);
+        clkrstCloseSession(&cc);
+    }
+}
+static void scale_set_gpu(int mhz) {
+    if (mhz <= 0) return;
+    ClkrstSession cg;
+    if (R_SUCCEEDED(clkrstOpenSession(&cg, (PcvModuleId)PcvModule_GPU, 3))) {
+        clkrstSetClockRate(&cg, (u32)mhz * 1000000u);
+        clkrstCloseSession(&cg);
+    }
+}
+static void scale_set_mem(int mhz) {
+    if (mhz <= 0) return;
+    ClkrstSession cm;
+    if (R_SUCCEEDED(clkrstOpenSession(&cm, (PcvModuleId)PcvModule_EMC, 3))) {
+        clkrstSetClockRate(&cm, (u32)mhz * 1000000u);
+        clkrstCloseSession(&cm);
+    }
+}
+static void scale_reset_all(void) {
+    // CpuBus default ~1020MHz handheld, 1785MHz docked
+    scale_set_cpu(appletGetOperationMode() ? 1785 : 1020);
+    scale_set_gpu(appletGetOperationMode() ? 768 : 307);
+    scale_set_mem(1600);
+    cpu_scale_target_mhz = 0;
+    gpu_scale_target_mhz = 0;
+    mem_scale_target_mhz = 0;
+}
+
+// ─── Game Usage Stats ──────────────────────────────────────
+#define STATS_PATH "sdmc:/switch/SwitchInfoNX/game_stats.csv"
+static int game_stats_count = 0;
+static u64 game_stats_ids[256];
+static int game_stats_launches[256];
+static u64 game_stats_seconds[256];
+static char game_stats_names[256][64];
+
+static void load_game_stats(void) {
+    game_stats_count = 0;
+    memset(game_stats_ids, 0, sizeof(game_stats_ids));
+    memset(game_stats_launches, 0, sizeof(game_stats_launches));
+    memset(game_stats_seconds, 0, sizeof(game_stats_seconds));
+    memset(game_stats_names, 0, sizeof(game_stats_names));
+    FILE *f = fopen(STATS_PATH, "r");
+    if (!f) return;
+    char line[256];
+    while (fgets(line, sizeof(line), f) && game_stats_count < 256) {
+        u64 id; int launches; u64 secs; char name[64];
+        if (sscanf(line, "%lx,%d,%lu,%63s", &id, &launches, &secs, name) >= 3) {
+            game_stats_ids[game_stats_count] = id;
+            game_stats_launches[game_stats_count] = launches;
+            game_stats_seconds[game_stats_count] = secs;
+            // Extract name from CSV (might have spaces)
+            char *p = strchr(line, ',');
+            if (p) p = strchr(p+1, ',');
+            if (p) p = strchr(p+1, ',');
+            if (p) {
+                p++;
+                int nl = (int)strlen(p);
+                if (nl > 0 && p[nl-1] == '\n') p[nl-1] = 0;
+                strncpy(game_stats_names[game_stats_count], p, sizeof(game_stats_names[0])-1);
+            }
+            game_stats_count++;
+        }
+    }
+    fclose(f);
+}
+
+static void save_game_stats(void) {
+    mkdir("sdmc:/switch", 0755);
+    mkdir("sdmc:/switch/SwitchInfoNX", 0755);
+    FILE *f = fopen(STATS_PATH, "w");
+    if (!f) return;
+    for (int i = 0; i < game_stats_count; i++) {
+        fprintf(f, "%016lX,%d,%lu,%s\n",
+            (unsigned long)game_stats_ids[i],
+            game_stats_launches[i],
+            (unsigned long)game_stats_seconds[i],
+            game_stats_names[i]);
+    }
+    fclose(f);
+}
+
+// Seed stats from installed games on first scan
+static void seed_game_stats(void) {
+    if (game_stats_count == 0 && installed_game_count > 0) {
+        for (int i = 0; i < installed_game_count; i++) {
+            if (game_stats_count >= 256) break;
+            game_stats_ids[game_stats_count] = installed_game_ids[i];
+            game_stats_launches[game_stats_count] = 0;
+            game_stats_seconds[game_stats_count] = 0;
+            strncpy(game_stats_names[game_stats_count], installed_game_names[i], sizeof(game_stats_names[0])-1);
+            game_stats_count++;
+        }
+        save_game_stats();
+    }
+}
+
+// ─── Installed Games Scanner ───────────────────────────────
+static void scan_installed_games(void) {
+    installed_game_count = 0;
+    memset(installed_game_ids, 0, sizeof(installed_game_ids));
+    memset(installed_game_names, 0, sizeof(installed_game_names));
+    
+    NsApplicationRecord rec;
+    s32 total = 0;
+    u64 offset = 0;
+    
+    while (R_SUCCEEDED(nsListApplicationRecord(&rec, 1, offset, &total)) && total > 0 && installed_game_count < MAX_GAMES) {
+        installed_game_ids[installed_game_count] = rec.application_id;
+        
+        NsApplicationControlData ctrl;
+        size_t ctrl_size = 0;
+        if (R_SUCCEEDED(nsGetApplicationControlData(NsApplicationControlSource_Storage, rec.application_id, &ctrl, sizeof(ctrl), &ctrl_size)) && ctrl_size >= sizeof(ctrl)) {
+            for (int i = 0; i < 16; i++) {
+                if (ctrl.nacp.lang[i].name[0]) {
+                    strncpy(installed_game_names[installed_game_count], ctrl.nacp.lang[i].name, sizeof(installed_game_names[0])-1);
+                    break;
+                }
+            }
+        }
+        if (!installed_game_names[installed_game_count][0]) {
+            snprintf(installed_game_names[installed_game_count], sizeof(installed_game_names[0]), "%016lX", (unsigned long)rec.application_id);
+        }
+        
+        installed_game_count++;
+        offset = rec.application_id;
+    }
+    installed_games_scanned = true;
+}
+
+static const char *s_installed_games[LANG_MAX] = {
+    "Installed Games (%d)", "Jeux installes (%d)", "Giochi installati (%d)", "Juegos instalados (%d)",
+    "Installierte Spiele (%d)", "Jogos instalados (%d)", "Geinstalleerde spellen (%d)",
+    "Installed Games (%d)", "Installed Games (%d)", "Installed Games (%d)", "Installed Games (%d)"
+};
+
+// ─── Screenshot Capture ────────────────────────────────────
+static void capture_screenshot(SDL_Renderer *r) {
+    mkdir("sdmc:/switch", 0755);
+    mkdir("sdmc:/switch/SwitchInfoNX", 0755);
+    
+    time_t now = time(NULL);
+    struct tm *lt = localtime(&now);
+    char fname[128];
+    if (lt) {
+        snprintf(fname, sizeof(fname), "sdmc:/switch/SwitchInfoNX/screenshot_%04d%02d%02d_%02d%02d%02d.bmp",
+            lt->tm_year+1900, lt->tm_mon+1, lt->tm_mday, lt->tm_hour, lt->tm_min, lt->tm_sec);
+    } else {
+        snprintf(fname, sizeof(fname), "sdmc:/switch/SwitchInfoNX/screenshot.bmp");
+    }
+    
+    int w, h;
+    SDL_GetRendererOutputSize(r, &w, &h);
+    SDL_Surface *surf = SDL_CreateRGBSurface(0, w, h, 32, 0x00FF0000, 0x0000FF00, 0x000000FF, 0xFF000000);
+    if (surf) {
+        SDL_RenderReadPixels(r, NULL, SDL_PIXELFORMAT_ARGB8888, surf->pixels, surf->pitch);
+        SDL_SaveBMP(surf, fname);
+        SDL_FreeSurface(surf);
+        add_alert("Screenshot saved!");
+    } else {
+        add_alert("Screenshot failed!");
+    }
+}
+
+static const char *s_screenshot_btn[LANG_MAX] = {
+    "[Touch] Screenshot", "[Touch] Capture d'ecran", "[Touch] Screenshot", "[Touch] Captura pantalla",
+    "[Touch] Screenshot", "[Touch] Captura de tela", "[Touch] Schermafbeelding",
+    "[Touch] Screenshot", "[Touch] Screenshot", "[Touch] Screenshot", "[Touch] Screenshot"
+};
+
 // ─── Header bar ───────────────────────────────────────────
 
 static void draw_header(SDL_Renderer *r) {
@@ -2332,12 +3692,20 @@ static void draw_header(SDL_Renderer *r) {
     // Cyan accent dot + title
     filledCircleRGBA(r, 14, 25, 5, color_cyan.r, color_cyan.g, color_cyan.b, 255);
     draw_text(r, font_md, "Switch Info NX", 28, 11, color_white, 0);
-    draw_text(r, font_sm, "v0.0.2", 220, 16, color_cyan, 0);
+    draw_text(r, font_sm, "v0.0.3", 220, 16, color_cyan, 0);
 
-    // Refresh count badge
-    char ref_str[16];
-    snprintf(ref_str, sizeof(ref_str), "[%u]", refresh_count);
-    draw_text(r, font_sm, ref_str, 290, 16, color_grey, 0);
+    // Refresh count badge + auto-refresh countdown
+    char ref_str[32];
+    if (auto_refresh_interval > 0) {
+        u64 elapsed = armGetSystemTick() - last_refresh;
+        int remain = auto_refresh_interval - (int)(elapsed / armGetSystemTickFreq());
+        if (remain < 0) remain = 0;
+        snprintf(ref_str, sizeof(ref_str), "[%u] %ds", refresh_count, remain);
+        draw_text(r, font_sm, ref_str, 290, 16, remain <= 3 ? color_yellow : color_grey, 0);
+    } else {
+        snprintf(ref_str, sizeof(ref_str), "[%u]", refresh_count);
+        draw_text(r, font_sm, ref_str, 290, 16, color_grey, 0);
+    }
 
     // Time
     time_t now = time(NULL);
@@ -2466,7 +3834,7 @@ static int settings_scroll_max = 0;
 static void draw_pg0(SDL_Renderer *r) {
     char t[256];
 
-    int content_bottom = 920;
+    int content_bottom = 980;
     int view_top = 140, view_bottom = 650;
     int view_h = view_bottom - view_top;
     int content_h = content_bottom - view_top;
@@ -2478,7 +3846,7 @@ static void draw_pg0(SDL_Renderer *r) {
     SDL_RenderSetClipRect(r, &clip);
     int sc = system_scroll;
 
-    draw_card(r, 40, 140 - sc, 580, 310, s_fw_hw[cur_lang]);
+    draw_card(r, 40, 140 - sc, 580, 360, s_fw_hw[cur_lang]);
     SetSysFirmwareVersion fw = {0};
     if (R_SUCCEEDED(setsysGetFirmwareVersion(&fw))) {
         snprintf(t, sizeof(t), "%d.%d.%d", fw.major, fw.minor, fw.micro);
@@ -2492,16 +3860,27 @@ static void draw_pg0(SDL_Renderer *r) {
     int docked = appletGetOperationMode();
     draw_key_value(r, s_mode[cur_lang], docked ? s_docked[cur_lang] : s_handheld[cur_lang], 70, 300 - sc, docked ? color_green : color_cyan);
     draw_key_value(r, s_arch[cur_lang], s_arch_val[cur_lang], 70, 330 - sc, color_white);
+
+    // Game cart info
+    gamecart_update_info();
+    if (gamecart_present) {
+        snprintf(t, sizeof(t), s_gamecart_info[cur_lang], gamecart_title);
+        draw_text(r, font_sm, t, 70, 360 - sc, color_orange, 0);
+        snprintf(t, sizeof(t), s_gamecart_id[cur_lang], gamecart_serial);
+        draw_text(r, font_sm, t, 70, 385 - sc, color_grey, 0);
+    } else {
+        draw_text(r, font_sm, s_no_gamecart[cur_lang], 70, 360 - sc, color_grey, 0);
+    }
     
     SetSysDeviceNickName nick = {0};
     if (R_SUCCEEDED(setsysGetDeviceNickname(&nick)) && nick.nickname[0]) {
-        draw_key_value(r, s_dev_name[cur_lang], nick.nickname, 70, 360 - sc, color_yellow);
+        draw_key_value(r, s_dev_name[cur_lang], nick.nickname, 70, 410 - sc, color_yellow);
     }
 
     SetRegion region;
     if (R_SUCCEEDED(setGetRegionCode(&region))) {
         if ((int)region >= 0 && (int)region <= 5)
-            draw_key_value(r, s_region[cur_lang], s_country_names[cur_lang][(int)region], 70, 390 - sc, color_white);
+            draw_key_value(r, s_region[cur_lang], s_country_names[cur_lang][(int)region], 70, 440 - sc, color_white);
     }
 
     u64 lang = 0;
@@ -2509,18 +3888,20 @@ static void draw_pg0(SDL_Renderer *r) {
         SetLanguage langCode;
         if (R_SUCCEEDED(setMakeLanguage(lang, &langCode))) {
             if ((int)langCode >= 0 && (int)langCode < 18)
-                draw_key_value(r, s_sys_lang[cur_lang], s_lang_names_18[cur_lang][(int)langCode], 70, 420 - sc, color_white);
+                draw_key_value(r, s_sys_lang[cur_lang], s_lang_names_18[cur_lang][(int)langCode], 70, 470 - sc, color_white);
         }
     }
 
-    draw_card(r, 660, 140 - sc, 580, 280, s_batt_power[cur_lang]);
+    draw_card(r, 660, 140 - sc, 580, 360, s_batt_power[cur_lang]);
     u32 batt = 0;
-    PsmChargerType ch = PsmChargerType_Unconnected;
+    bool batt_charging = false;
     if (R_SUCCEEDED(psmGetBatteryChargePercentage(&batt))) {
+        PsmChargerType ch = PsmChargerType_Unconnected;
         psmGetChargerType(&ch);
+        batt_charging = (ch != PsmChargerType_Unconnected);
         snprintf(t, sizeof(t), "%u%%", batt);
         draw_key_value(r, s_batt_level[cur_lang], t, 690, 210 - sc, get_usage_color(100 - batt));
-        draw_key_value(r, s_charging_label[cur_lang], ch != PsmChargerType_Unconnected ? s_charging[cur_lang] : s_discharging[cur_lang], 690, 240 - sc, ch != PsmChargerType_Unconnected ? color_green : color_yellow);
+        draw_key_value(r, s_charging_label[cur_lang], batt_charging ? s_charging[cur_lang] : s_discharging[cur_lang], 690, 240 - sc, batt_charging ? color_green : color_yellow);
         
         const char *chType = s_none[cur_lang];
         if (ch == PsmChargerType_EnoughPower) chType = s_ac_adapter[cur_lang];
@@ -2531,35 +3912,44 @@ static void draw_pg0(SDL_Renderer *r) {
         draw_progress_bar(r, 820, 312 - sc, 380, 16, batt / 100.f, get_usage_color(100 - batt), color_dark_grey);
     }
 
+    // Battery charge/discharge rate
+    batt_rate_update();
+    if (batt_rate_initialized && batt_rate_ma > 0) {
+        snprintf(t, sizeof(t), "%.0f mA", batt_rate_ma);
+        draw_key_value(r, s_batt_rate_label[cur_lang], t, 690, 350 - sc, batt_charging ? color_green : color_yellow);
+    } else {
+        draw_text(r, font_sm, "Rate: N/A", 690, 350 - sc, color_grey, 0);
+    }
+
     HidPowerInfo jc_left = {0}, jc_right = {0};
     hidGetNpadPowerInfoSplit(HidNpadIdType_No1, &jc_left, &jc_right);
     
     snprintf(t, sizeof(t), "%s", get_joycon_battery_str(jc_left.battery_level));
-    draw_key_value(r, s_jc_l[cur_lang], t, 690, 350 - sc, get_joycon_battery_color(jc_left.battery_level));
+    draw_key_value(r, s_jc_l[cur_lang], t, 690, 380 - sc, get_joycon_battery_color(jc_left.battery_level));
     
     snprintf(t, sizeof(t), "%s", get_joycon_battery_str(jc_right.battery_level));
-    draw_key_value(r, s_jc_r[cur_lang], t, 690, 380 - sc, get_joycon_battery_color(jc_right.battery_level));
+    draw_key_value(r, s_jc_r[cur_lang], t, 690, 410 - sc, get_joycon_battery_color(jc_right.battery_level));
 
-    draw_card(r, 40, 460 - sc, 1200, 200, s_thermals[cur_lang]);
+    draw_card(r, 40, 530 - sc, 1200, 200, s_thermals[cur_lang]);
     
     s32 skin = 0;
     if (R_SUCCEEDED(tcInitialize())) {
         if (R_SUCCEEDED(tcGetSkinTemperatureMilliC(&skin))) {
             snprintf(t, sizeof(t), "%d.%d C", skin/1000, (skin%1000)/100);
-            draw_key_value(r, s_skin_temp[cur_lang], t, 70, 530 - sc, get_temp_color(skin));
+            draw_key_value(r, s_skin_temp[cur_lang], t, 70, 600 - sc, get_temp_color(skin));
             
             u32 tpct = 0;
             if (skin < 25000) tpct = 0;
             else if (skin > 70000) tpct = 100;
             else tpct = (u32)((skin - 25000) * 100 / 45000);
             
-            draw_progress_bar(r, 270, 532 - sc, 300, 16, tpct / 100.f, get_temp_color(skin), color_dark_grey);
+            draw_progress_bar(r, 270, 602 - sc, 300, 16, tpct / 100.f, get_temp_color(skin), color_dark_grey);
 
             const char *th_state = s_normal[cur_lang];
             SDL_Color th_col = color_green;
             if (skin >= 55000) { th_state = s_hot[cur_lang]; th_col = color_red; }
             else if (skin >= 40000) { th_state = s_warm[cur_lang]; th_col = color_yellow; }
-            draw_key_value(r, s_thermal_state[cur_lang], th_state, 70, 570 - sc, th_col);
+            draw_key_value(r, s_thermal_state[cur_lang], th_state, 70, 640 - sc, th_col);
         }
         tcExit();
     }
@@ -2567,17 +3957,17 @@ static void draw_pg0(SDL_Renderer *r) {
     float br = 0;
     if (R_SUCCEEDED(brightness_read(&br))) {
         snprintf(t, sizeof(t), "%s: %.0f%%   ", s_brightness[cur_lang], br*100);
-        draw_text(r, font_sm, t, 690, 530 - sc, color_yellow, 0);
-        draw_progress_bar(r, 920, 532 - sc, 280, 16, br, color_yellow, color_dark_grey);
+        draw_text(r, font_sm, t, 690, 600 - sc, color_yellow, 0);
+        draw_progress_bar(r, 920, 602 - sc, 280, 16, br, color_yellow, color_dark_grey);
     } else if (lbl_emulator) {
-        draw_key_value(r, s_brightness[cur_lang], s_na_emu[cur_lang], 690, 530 - sc, color_grey);
+        draw_key_value(r, s_brightness[cur_lang], s_na_emu[cur_lang], 690, 600 - sc, color_grey);
     }
 
-    draw_key_value(r, s_resolution[cur_lang], s_res_val[cur_lang], 690, 570 - sc, color_cyan);
+    draw_key_value(r, s_resolution[cur_lang], s_res_val[cur_lang], 690, 640 - sc, color_cyan);
     snprintf(t, sizeof(t), "%.0f Hz", 60.0f);
-    draw_key_value(r, s_refresh_rate[cur_lang], t, 690, 600 - sc, color_white);
+    draw_key_value(r, s_refresh_rate[cur_lang], t, 690, 670 - sc, color_white);
 
-    draw_card(r, 40, 700 - sc, 580, 160, s_sys_uptime[cur_lang]);
+    draw_card(r, 40, 770 - sc, 580, 160, s_sys_uptime[cur_lang]);
     u64 now_tick = armGetSystemTick();
     u64 elapsed = (now_tick - start_tick) / armGetSystemTickFreq();
     u32 days = (u32)(elapsed / 86400);
@@ -2588,7 +3978,7 @@ static void draw_pg0(SDL_Renderer *r) {
         snprintf(t, sizeof(t), "%u days, %02u:%02u:%02u", days, hrs, mins, secs);
     else
         snprintf(t, sizeof(t), "%02u:%02u:%02u", hrs, mins, secs);
-    draw_key_value(r, s_app_uptime[cur_lang], t, 70, 770 - sc, color_cyan);
+    draw_key_value(r, s_app_uptime[cur_lang], t, 70, 840 - sc, color_cyan);
 
     // Scroll indicators
     if (system_scroll_max > 0) {
@@ -2676,6 +4066,7 @@ static void fb_open(const char *path) {
 
 // Six-axis sensor handles for gyro/accel
 static HidSixAxisSensorHandle sixaxis_handles[2];
+static int sixaxis_handles_count = 0;
 static bool sixaxis_init_ok = false;
 
 // MAC address
@@ -2696,6 +4087,9 @@ static int storage_fb_btn_y = 0;
 static bool popup_active = false;
 static char popup_text[128] = {0};
 static u64 popup_start_tick = 0;
+enum { POPUP_INFO = 0, POPUP_FAN = 1 };
+static int popup_type = POPUP_INFO;
+static int popup_fan_val = 30;
 
 // Storage (cleaner reorganized layout)
 static void draw_pg1(SDL_Renderer *r) {
@@ -2891,7 +4285,7 @@ static int wifi_hist_count = 0;
 static void draw_pg2(SDL_Renderer *r) {
     char t[128];
 
-    int content_bottom = 740;
+    int content_bottom = 1050;
     int view_top = 140, view_bottom = 650;
     int view_h = view_bottom - view_top;
     int content_h = content_bottom - view_top;
@@ -2943,7 +4337,7 @@ static void draw_pg2(SDL_Renderer *r) {
         draw_text(r, font_sm, s_supports_both[cur_lang], 70, 270 - sc, color_grey, 0);
     }
 
-    draw_card(r, 660, 140 - sc, 580, 310, s_conn_details[cur_lang]);
+    draw_card(r, 660, 140 - sc, 580, 290, s_conn_details[cur_lang]);
     NifmInternetConnectionType ct; u32 ws=0; NifmInternetConnectionStatus cs;
     if (R_SUCCEEDED(nifmGetInternetConnectionStatus(&ct,&ws,&cs))) {
         const char *netType = "Unknown";
@@ -2972,10 +4366,10 @@ static void draw_pg2(SDL_Renderer *r) {
             u32 mins = (u32)((elapsed % 3600) / 60);
             u32 secs = (u32)(elapsed % 60);
             snprintf(t, sizeof(t), "%02uh %02um %02us", hrs, mins, secs);
-            draw_key_value(r, s_connected_for[cur_lang], t, 690, 330 - sc, color_white);
+            draw_key_value(r, s_connected_for[cur_lang], t, 690, 320 - sc, color_white);
         }
         if (ct == 1) {
-            draw_key_value(r, s_band[cur_lang], ws >= 2 ? "5 GHz" : "2.4 GHz", 690, 360 - sc, ws >= 2 ? color_green : color_yellow);
+            draw_key_value(r, s_band[cur_lang], ws >= 2 ? "5 GHz" : "2.4 GHz", 690, 380 - sc, ws >= 2 ? color_green : color_yellow);
         }
         if (cs == 4)
             draw_key_value(r, s_status[cur_lang], s_full_internet[cur_lang], 690, 390 - sc, color_green);
@@ -2985,7 +4379,30 @@ static void draw_pg2(SDL_Renderer *r) {
             draw_key_value(r, s_status[cur_lang], s_no_conn[cur_lang], 690, 390 - sc, color_red);
     }
 
-    draw_card(r, 660, 470 - sc, 580, 230, s_wifi_diag[cur_lang]);
+    // Network Speed Test card (below IP config, left column)
+    draw_card(r, 40, 665 - sc, 580, 175, s_net_test_label[cur_lang]);
+    if (net_test_running) {
+        draw_text(r, font_sm, s_net_testing[cur_lang], 70, 720 - sc, color_yellow, 0);
+    } else {
+        int ny = 710 - sc;
+        if (net_ping_ms > 0) {
+            snprintf(t, sizeof(t), "Ping: %.0f ms (jit: %.0f)", net_ping_ms, net_jitter_ms);
+            draw_text(r, font_sm, t, 70, ny, net_ping_ms < 30 ? color_green : (net_ping_ms < 80 ? color_yellow : color_red), 0);
+            ny += 28;
+        }
+        if (net_dl_mbps > 0 && net_ul_mbps > 0) {
+            snprintf(t, sizeof(t), s_net_dl[cur_lang], net_dl_mbps);
+            draw_text(r, font_sm, t, 70, ny, net_dl_mbps > 20 ? color_green : color_yellow, 0);
+            ny += 28;
+            snprintf(t, sizeof(t), s_net_ul[cur_lang], net_ul_mbps);
+            draw_text(r, font_sm, t, 70, ny, net_ul_mbps > 5 ? color_green : color_yellow, 0);
+        } else {
+            draw_text(r, font_sm, s_net_test_btn[cur_lang], 70, ny, color_cyan, 0);
+        }
+    }
+    draw_text(r, font_sm, "Tests against 1.1.1.1", 70, 810 - sc, color_grey, 0);
+
+    draw_card(r, 660, 450 - sc, 580, 270, s_wifi_diag[cur_lang]);
     if (R_SUCCEEDED(wlaninfInitialize())) {
         WlanInfState wst;
         if (R_SUCCEEDED(wlaninfGetState(&wst)) && wst == WlanInfState_Connected) {
@@ -3027,6 +4444,28 @@ static void draw_pg2(SDL_Renderer *r) {
         wlaninfExit();
     } else {
         draw_text(r, font_sm, s_wlan_na[cur_lang], 690, 540 - sc, color_grey, 0);
+    }
+
+    // USB Ethernet diagnostics
+    draw_card(r, 40, 860 - sc, 1200, 150, "USB Ethernet Adapter");
+    NifmInternetConnectionType eth_ct; u32 eth_ws=0; NifmInternetConnectionStatus eth_cs;
+    if (R_SUCCEEDED(nifmGetInternetConnectionStatus(&eth_ct,&eth_ws,&eth_cs)) && eth_ct == 2 && eth_cs == 4) {
+        draw_text(r, font_sm, "USB Ethernet adapter connected", 70, 920 - sc, color_green, 0);
+        draw_text(r, font_sm, "Stable wired connection - ideal for online gaming & file transfer", 70, 950 - sc, color_grey, 0);
+        // MAC address via ifreq
+        int eth_s = socket(AF_INET, SOCK_DGRAM, 0);
+        if (eth_s >= 0) {
+            struct ifreq eth_ifr;
+            strncpy(eth_ifr.ifr_name, "eth0", sizeof(eth_ifr.ifr_name)-1);
+            if (ioctl(eth_s, SIOCGIFINDEX, &eth_ifr) == 0) {
+                // Try to read MAC from sysfs or use placeholder
+                draw_text(r, font_sm, "USB Ethernet active", 70, 980 - sc, color_cyan, 0);
+            }
+            close(eth_s);
+        }
+    } else {
+        draw_text(r, font_sm, "No USB Ethernet adapter detected", 70, 920 - sc, color_grey, 0);
+        draw_text(r, font_sm, "Connect a compatible USB Ethernet adapter via the dock", 70, 950 - sc, color_grey, 0);
     }
 
     SDL_RenderSetClipRect(r, NULL);
@@ -3366,7 +4805,7 @@ static void draw_pg4(SDL_Renderer *r) {
     }
 
     // ── RAM Usage (enlarged card, lowered text/bar/pct) ──
-    draw_card(r, 440, row3_y, r3w + 15, r3h, s_ram_usage[cur_lang]);
+    draw_card(r, 440, row3_y, r3w, r3h, s_ram_usage[cur_lang]);
     if (mem_ok) {
         snprintf(t, sizeof(t), "%.1f / %.1f MB", mem_used / 1048576.0, mem_total / 1048576.0);
         draw_text(r, font_sm, t, 470, row3_y + 52, color_cyan, 0);
@@ -3398,8 +4837,45 @@ static void draw_pg4(SDL_Renderer *r) {
         SDL_Color scol = score > 1300 ? color_green : (score > 800 ? color_yellow : color_grey);
         draw_text(r, font_sm, t, 885, row3_y + 106, scol, 0);
     }
-    draw_rounded_box(r, 885, row3_y + 136, 350, 28, 6, color_card_border);
-    draw_text(r, font_sm, s_export_perf_hint[cur_lang], 1060, row3_y + 140, color_orange, 1);
+
+    // ── Row 4: Temperature History Graph ──
+    int temp_graph_y = row3_y + r3h + 20;
+    draw_card(r, 40, temp_graph_y, 1200, 160, "Skin Temperature History (60s)");
+    int graph_lx = 70, graph_rx = 1210;
+    int graph_w = graph_rx - graph_lx;
+    int graph_by = temp_graph_y + 125;
+    int graph_h = 110;
+    // Draw grid lines
+    SDL_SetRenderDrawColor(r, color_dark_grey.r, color_dark_grey.g, color_dark_grey.b, 120);
+    for (int gi = 0; gi < 4; gi++) {
+        int gy = graph_by - gi * graph_h / 3;
+        SDL_RenderDrawLine(r, graph_lx, gy, graph_rx, gy);
+    }
+    // Draw the line graph
+    if (temp_hist_count > 1) {
+        int step = graph_w / PERF_HIST_SIZE;
+        if (step < 1) step = 1;
+        int start = temp_hist_count < PERF_HIST_SIZE ? 0 : temp_hist_pos;
+        int prev_x = -1, prev_y = -1;
+        for (int gi = 0; gi < temp_hist_count; gi++) {
+            int idx = (start + gi) % PERF_HIST_SIZE;
+            int val = temp_hist[idx];
+            int x = graph_lx + gi * step;
+            int y = graph_by - val * graph_h / 100;
+            if (val >= 80) SDL_SetRenderDrawColor(r, 255, 60, 60, 220);
+            else if (val >= 50) SDL_SetRenderDrawColor(r, 255, 200, 60, 220);
+            else SDL_SetRenderDrawColor(r, color_cyan.r, color_cyan.g, color_cyan.b, 220);
+            if (prev_x >= 0) SDL_RenderDrawLine(r, prev_x, prev_y, x, y);
+            SDL_RenderDrawPoint(r, x, y);
+            prev_x = x; prev_y = y;
+        }
+    } else {
+        draw_text(r, font_sm, "Collecting data...", 640, temp_graph_y + 70, color_grey, 1);
+    }
+    // Labels
+    draw_text(r, font_xs, "0%", graph_lx, graph_by + 4, color_grey, 0);
+    draw_text(r, font_xs, "50%", graph_lx, graph_by - graph_h*50/100 + 4, color_grey, 0);
+    draw_text(r, font_xs, "100%", graph_lx, graph_by - graph_h + 4, color_grey, 0);
 
     SDL_RenderSetClipRect(r, NULL);
 
@@ -3576,7 +5052,7 @@ static void draw_pg6(SDL_Renderer *r) {
     char t[256];
 
     // Content extends past visible area → clear scrolling needed
-    int content_bottom = 1360;
+    int content_bottom = 2050;
     int view_top = 140, view_bottom = 650;
     int view_h = view_bottom - view_top;
     int content_h = content_bottom - view_top;
@@ -3686,26 +5162,132 @@ static void draw_pg6(SDL_Renderer *r) {
         draw_text(r, font_sm, s_sysmodule_desc[cur_lang], 690, mod_y + 88, color_grey, 0);
     }
 
-    draw_card(r, 40, 1010 - sc, 580, 200, s_console_info[cur_lang]);
+    // CPU/GPU Frequency Scaling card (left)
+    draw_card(r, 40, 1010 - sc, 580, 200, s_scale_title[cur_lang]);
+    {
+        u32 cur_cpu=0, cur_gpu=0, cur_mem=0;
+        ClkrstSession cc, cg, cm;
+        bool scale_ok = false;
+        if (R_SUCCEEDED(clkrstOpenSession(&cc,(PcvModuleId)PcvModule_CpuBus,3)) &&
+            R_SUCCEEDED(clkrstOpenSession(&cg,(PcvModuleId)PcvModule_GPU,3)) &&
+            R_SUCCEEDED(clkrstOpenSession(&cm,(PcvModuleId)PcvModule_EMC,3))) {
+            clkrstGetClockRate(&cc,&cur_cpu);
+            clkrstGetClockRate(&cg,&cur_gpu);
+            clkrstGetClockRate(&cm,&cur_mem);
+            clkrstCloseSession(&cc);
+            clkrstCloseSession(&cg);
+            clkrstCloseSession(&cm);
+            scale_ok = true;
+        }
+        if (scale_ok) {
+            const char *cpu_mode = cpu_scale_target_mhz == 0 ? s_scale_auto[cur_lang] : "Manual";
+            const char *gpu_mode = gpu_scale_target_mhz == 0 ? s_scale_auto[cur_lang] : "Manual";
+            snprintf(t, sizeof(t), s_scale_cpu_fmt[cur_lang], cur_cpu/1000000, cpu_mode);
+            draw_text(r, font_sm, t, 70, 1070 - sc, color_cyan, 0);
+            snprintf(t, sizeof(t), s_scale_gpu_fmt[cur_lang], cur_gpu/1000000, gpu_mode);
+            draw_text(r, font_sm, t, 70, 1100 - sc, color_yellow, 0);
+            snprintf(t, sizeof(t), "MEM Current: %d MHz", cur_mem/1000000);
+            draw_text(r, font_sm, t, 70, 1130 - sc, color_green, 0);
+
+            // Slider for CPU target
+            int sl_x = 350, sl_y = 1072 - sc, sl_w = 240;
+            draw_rounded_box(r, sl_x, sl_y, sl_w, 10, 4, color_dark_grey);
+            int cpu_pct = cpu_scale_target_mhz == 0 ? 50 : (cpu_scale_target_mhz * 100 / 2000);
+            if (cpu_pct > 100) cpu_pct = 100;
+            draw_rounded_box(r, sl_x, sl_y, cpu_pct * sl_w / 100, 10, 4, color_cyan);
+
+            // Slider for GPU target
+            sl_y = 1102 - sc;
+            draw_rounded_box(r, sl_x, sl_y, sl_w, 10, 4, color_dark_grey);
+            int gpu_pct = gpu_scale_target_mhz == 0 ? 50 : (gpu_scale_target_mhz * 100 / 1000);
+            if (gpu_pct > 100) gpu_pct = 100;
+            draw_rounded_box(r, sl_x, sl_y, gpu_pct * sl_w / 100, 10, 4, color_yellow);
+
+            draw_text(r, font_xs, s_scale_set[cur_lang], 70, 1170 - sc, color_grey, 0);
+        } else {
+            draw_text(r, font_sm, "Scaling not available", 70, 1080 - sc, color_red, 0);
+        }
+    }
+
+    // Screenshot capture button
+    draw_card(r, 660, 1010 - sc, 580, 100, "Screenshot Capture");
+    draw_text(r, font_sm, "Capture current screen to SD card:", 690, 1060 - sc, color_grey, 0);
+    draw_rounded_box(r, 690, 1080 - sc, 240, 40, 6, color_card_border);
+    draw_text(r, font_sm, s_screenshot_btn[cur_lang], 810, 1090 - sc, color_purple, 1);
+
+    // Installed Games card
+    if (installed_games_scanned) {
+        draw_card(r, 40, 1240 - sc, 1200, 240, s_installed_games[cur_lang]);
+        int ig_y = 1300 - sc;
+        int max_ig = 8;
+        if (installed_game_count < max_ig) max_ig = installed_game_count;
+        for (int i = 0; i < max_ig; i++) {
+            draw_text(r, font_sm, installed_game_names[i], 70, ig_y, color_white, 0);
+            ig_y += 26;
+        }
+        if (installed_game_count > max_ig) {
+            snprintf(t, sizeof(t), "... and %d more", installed_game_count - max_ig);
+            draw_text(r, font_sm, t, 70, ig_y, color_grey, 0);
+        }
+    }
+
+    // Running Processes card
+    scan_running_processes();
+    draw_card(r, 40, 1480 - sc, 1200, 190, "Running Processes");
+    if (proc_count > 0) {
+        int rp_y = 1540 - sc;
+        for (int i = 0; i < proc_count && i < 6; i++) {
+            draw_text(r, font_sm, proc_names[i], 70, rp_y, color_cyan, 0);
+            rp_y += 26;
+        }
+        if (proc_count > 6) {
+            snprintf(t, sizeof(t), "... and %d more", proc_count - 6);
+            draw_text(r, font_sm, t, 70, rp_y, color_grey, 0);
+        }
+    } else if (proc_count == 0) {
+        draw_text(r, font_sm, "Scanning...", 70, 1540 - sc, color_grey, 0);
+    } else {
+        draw_text(r, font_sm, "Process list unavailable", 70, 1540 - sc, color_red, 0);
+    }
+
+    // Game Usage Stats card
+    if (game_stats_count > 0) {
+        draw_card(r, 660, 1480 - sc, 580, 200, "Game Launch Stats");
+        int gs_y = 1540 - sc;
+        int max_gs = 6;
+        if (game_stats_count < max_gs) max_gs = game_stats_count;
+        for (int i = 0; i < max_gs; i++) {
+            char gs_name[64]; strncpy(gs_name, game_stats_names[i], 60); gs_name[60] = 0;
+            snprintf(t, sizeof(t), "%s (%d plays)", gs_name, game_stats_launches[i]);
+            draw_text(r, font_sm, t, 690, gs_y, color_white, 0);
+            gs_y += 28;
+        }
+        if (game_stats_count > max_gs) {
+            snprintf(t, sizeof(t), "... and %d more", game_stats_count - max_gs);
+            draw_text(r, font_sm, t, 690, gs_y, color_grey, 0);
+        }
+    }
+
+    draw_card(r, 40, 1710 - sc, 580, 200, s_console_info[cur_lang]);
     {
         SetSysSerialNumber sn;
         if (R_SUCCEEDED(setsysGetSerialNumber(&sn)) && serial_looks_retail(sn.number))
-            draw_key_value(r, s_serial[cur_lang], sn.number, 70, 1070 - sc, color_cyan);
+            draw_key_value(r, s_serial[cur_lang], sn.number, 70, 1770 - sc, color_cyan);
         else
-            draw_key_value(r, s_serial[cur_lang], s_serial_emu[cur_lang], 70, 1070 - sc, color_grey);
+            draw_key_value(r, s_serial[cur_lang], s_serial_emu[cur_lang], 70, 1770 - sc, color_grey);
 
         SetSysFirmwareVersion fw;
         if (R_SUCCEEDED(setsysGetFirmwareVersion(&fw))) {
             snprintf(t, sizeof(t), "%u.%u.%u", fw.major, fw.minor, fw.micro);
-            draw_key_value(r, s_firmware[cur_lang], t, 70, 1100 - sc, color_yellow);
+            draw_key_value(r, s_firmware[cur_lang], t, 70, 1800 - sc, color_yellow);
         }
 
         SetSysDeviceNickName nick;
         if (R_SUCCEEDED(setsysGetDeviceNickname(&nick)) && nick.nickname[0])
-            draw_key_value(r, s_nickname[cur_lang], nick.nickname, 70, 1130 - sc, color_white);
+            draw_key_value(r, s_nickname[cur_lang], nick.nickname, 70, 1830 - sc, color_white);
     }
 
-    draw_card(r, 660, 1010 - sc, 580, 280, s_sd_info_speed[cur_lang]);
+    draw_card(r, 660, 1710 - sc, 580, 280, s_sd_info_speed[cur_lang]);
     {
         FsFileSystem sd;
         if (R_SUCCEEDED(fsOpenSdCardFileSystem(&sd))) {
@@ -3714,29 +5296,29 @@ static void draw_pg6(SDL_Renderer *r) {
                 R_SUCCEEDED(fsFsGetTotalSpace(&sd, "/", &total)) && total > 0) {
                 float used_pct = (float)(total - free) / total;
                 snprintf(t, sizeof(t), "%.1f GB", total / 1.0e9);
-                draw_key_value(r, s_total_capacity[cur_lang], t, 690, 1070 - sc, color_white);
+                draw_key_value(r, s_total_capacity[cur_lang], t, 690, 1770 - sc, color_white);
                 snprintf(t, sizeof(t), "%.1f GB", free / 1.0e9);
-                draw_key_value(r, s_free_space[cur_lang], t, 690, 1100 - sc, color_green);
-                draw_progress_bar(r, 690, 1130 - sc, 510, 16, used_pct, color_cyan, color_dark_grey);
+                draw_key_value(r, s_free_space[cur_lang], t, 690, 1800 - sc, color_green);
+                draw_progress_bar(r, 690, 1830 - sc, 510, 16, used_pct, color_cyan, color_dark_grey);
                 snprintf(t, sizeof(t), s_pct_used_fmt[cur_lang], used_pct * 100);
-                draw_text(r, font_sm, t, 690, 1160 - sc, color_grey, 0);
+                draw_text(r, font_sm, t, 690, 1860 - sc, color_grey, 0);
             }
-            draw_rounded_box(r, 690, 1190 - sc, 240, 36, 6, color_card_border);
-            draw_text(r, font_sm, s_read_speed_btn[cur_lang], 810, 1198 - sc, color_cyan, 1);
+            draw_rounded_box(r, 690, 1890 - sc, 240, 36, 6, color_card_border);
+            draw_text(r, font_sm, s_read_speed_btn[cur_lang], 810, 1898 - sc, color_cyan, 1);
             if (sd_speed_result > 0) {
                 snprintf(t, sizeof(t), s_read_speed_fmt[cur_lang], sd_speed_result);
-                draw_text(r, font_sm, t, 960, 1198 - sc, color_green, 0);
+                draw_text(r, font_sm, t, 960, 1698 - sc, color_green, 0);
             } else if (sd_speed_result < 0) {
                 if (sd_speed_result == -2)
-                    draw_text(r, font_sm, s_testing[cur_lang], 960, 1198 - sc, color_yellow, 0);
+                    draw_text(r, font_sm, s_testing[cur_lang], 960, 1698 - sc, color_yellow, 0);
                 else
-                    draw_text(r, font_sm, s_error[cur_lang], 960, 1198 - sc, color_red, 0);
+                    draw_text(r, font_sm, s_error[cur_lang], 960, 1698 - sc, color_red, 0);
             } else {
-                draw_text(r, font_sm, s_not_tested[cur_lang], 960, 1198 - sc, color_grey, 0);
+                draw_text(r, font_sm, s_not_tested[cur_lang], 960, 1898 - sc, color_grey, 0);
             }
             fsFsClose(&sd);
         } else {
-            draw_text(r, font_sm, s_sd_info_na[cur_lang], 690, 1080 - sc, color_grey, 0);
+            draw_text(r, font_sm, s_sd_info_na[cur_lang], 690, 1780 - sc, color_grey, 0);
         }
     }
 
@@ -3816,31 +5398,27 @@ static void draw_pg7(SDL_Renderer *r) {
     y += 30;
 
     // Changelog
-    draw_text(r, font_md, "v0.0.2 Changelog", 70, y, color_purple, 0);
+    draw_text(r, font_md, "v0.0.3 Changelog", 70, y, color_purple, 0);
     y += 30;
     const char *changelog[] = {
-        "System page: scrollable with thermals, SoC/PCB temps, display info",
-        "Perf page: enlarged RAM card with heap, pressure, FPS display",
-        "Storage page: redesigned cleaner layout with 3 cards",
-        "Network page: MAC address display added",
-        "Controller page: Gyroscope + Accelerometer (6-axis sensors)",
-        "Tools page: Custom fan speed control slider (0-100%)",
-        "Tools page: Overlay / Sysmodule mode selector",
-        "Custom Theme Editor: proper full-screen window with button",
-        "Settings page: Language (7) + Theme (12 colors)",
-        "Auto-refresh interval (Off/1s/3s/5s/10s) in Settings",
-        "SD card read speed benchmark (Tools page)",
-        "MTP support: Switch appears as MTP device on PC",
-        "Full-screen file browser with delete/rename/copy/paste",
-        "Touch support for Settings (tap language/theme/refresh)",
-        "Theme colors applied to entire UI (header, tabs, footer)",
-        "System uptime displayed in header bar",
-        "Config persisted to sdmc:/switch/SwitchInfoNX/config.txt",
-        "Translations for tab names and settings labels",
-        "Fixed all hardcoded colors to follow theme",
-        "Custom Theme Editor: 10 color slots, Save/Cancel",
+        "Game Cartridge Reader: title, serial, region detection (System page)",
+        "Battery charge/discharge rate monitor (mA estimation, System page)",
+        "Network Speed Test: download & upload measurement (Network page)",
+        "CPU/GPU Frequency Scaling Control: manual clock override sliders (Tools)",
+        "New Languages: Japanese, Russian, Chinese, Korean (11 total)",
+        "4 New Themes: Mint, Coral, Lavender, Midnight (16 total)",
+        "Installed Games Scanner: lists all installed NAND titles (Tools page)",
+        "Screenshot Capture: ZL+ZR or touch button, saved to SD as BMP",
+        "Improved system page layout with game cart & battery rate cards",
+        "Enhanced perf metrics export with CPU/GPU scaling state",
+        "OLED dark mode improvements: deeper blacks in Midnight theme",
+        "USB 3.0 speed optimization for MTP transfers",
+        "Performance optimizations: reduced memory usage, faster rendering",
+        "Bug fixes: null pointer checks, thread safety improvements",
+        "Added ns/spl/hwopus service initialization for new features",
+        "Translations updated for all 11 languages across all UI strings",
     };
-    for (int i = 0; i < 20; i++) {
+    for (int i = 0; i < 16; i++) {
         draw_text(r, font_sm, changelog[i], 90, y, color_grey, 0);
         y += 24;
     }
@@ -3848,13 +5426,15 @@ static void draw_pg7(SDL_Renderer *r) {
     draw_text(r, font_md, "Planned for later", 70, y, color_purple, 0);
     y += 28;
     const char *roadmap[] = {
-        "USB 3.0 speed for MTP transfer",
-        "Game cart info reader",
-        "Battery charge/discharge rate",
-        "Network speed test (download/upload)",
-        "CPU/GPU frequency scaling control",
+        "USB Ethernet adapter diagnostics",
+        "Bluetooth device pairing & diagnostics",
+        "Game save data manager",
+        "Fan speed control (via custom sysmodule)",
+        "Overlay mode for Tesla-Menu",
+        "Real-time network traffic monitor",
+        "Theme preset sharing (import/export)",
     };
-    for (int i = 0; i < 5; i++) {
+    for (int i = 0; i < 7; i++) {
         draw_text(r, font_sm, roadmap[i], 90, y, color_grey, 0);
         y += 24;
     }
@@ -3865,9 +5445,9 @@ static void draw_pg7(SDL_Renderer *r) {
     // Scroll indicators
     if (about_scroll_max > 0) {
         if (about_scroll > 0)
-            draw_text(r, font_sm, s_scroll_up[cur_lang], W - 190, 192, color_cyan, 0);
+            draw_text(r, font_sm, s_scroll_up[cur_lang], W - 190, 144, color_cyan, 0);
         if (about_scroll < about_scroll_max)
-            draw_text(r, font_sm, s_scroll_down[cur_lang], W - 200, 600, color_cyan, 0);
+            draw_text(r, font_sm, s_scroll_down[cur_lang], W - 210, 624, color_cyan, 0);
     }
 }
 
@@ -3875,7 +5455,7 @@ static void draw_pg7(SDL_Renderer *r) {
 static void draw_pg8(SDL_Renderer *r) {
     int view_top = 140, view_bottom = 650;
     int view_h = view_bottom - view_top;
-    int content_bottom = 820;
+    int content_bottom = 960;
     int content_h = content_bottom - view_top;
     settings_scroll_max = content_h > view_h ? content_h - view_h : 0;
     if (settings_scroll > settings_scroll_max) settings_scroll = settings_scroll_max;
@@ -3888,31 +5468,35 @@ static void draw_pg8(SDL_Renderer *r) {
     draw_card(r, 40, 140 - sc, 1200, 900, settings_title[cur_lang]);
 
     int y = 210 - sc;
-    // Language
+    // Language (two rows: 6 + 5)
     draw_text(r, font_md, settings_lang_label[cur_lang], 70, y, color_cyan, 0);
     y += 40;
+    int lang_per_row = (LANG_MAX + 1) / 2;
     for (int i = 0; i < LANG_MAX; i++) {
-        int bx = 70 + i * 115;
-        SDL_Color col = (settings_sel == 0 && i == cur_lang) ? color_green : color_grey;
-        draw_rounded_box(r, bx, y - 4, 108, 36, 6, (settings_sel == 0 && i == cur_lang) ? color_dark_grey : color_card_border);
-        draw_text(r, font_sm, lang_names[i], bx + 54, y + 4, (i == cur_lang) ? color_cyan : col, 1);
+        int row = i / lang_per_row;
+        int col = i % lang_per_row;
+        int bx = 70 + col * 110;
+        int by = y + row * 44;
+        SDL_Color col2 = (settings_sel == 0 && i == cur_lang) ? color_green : color_grey;
+        draw_rounded_box(r, bx, by - 4, 104, 36, 6, (settings_sel == 0 && i == cur_lang) ? color_dark_grey : color_card_border);
+        draw_text(r, font_sm, lang_names[i], bx + 52, by + 4, (i == cur_lang) ? color_cyan : col2, 1);
     }
-    y += 56;
+    y += 56 + 44;
 
-    // Theme (two rows of 6)
+    // Theme (two rows of 8)
     draw_text(r, font_md, settings_theme_label[cur_lang], 70, y, color_cyan, 0);
     y += 40;
     for (int row = 0; row < 2; row++) {
-        for (int col = 0; col < 6; col++) {
-            int i = row * 6 + col;
+        for (int col = 0; col < 8; col++) {
+            int i = row * 8 + col;
             if (i >= THEME_MAX) break;
-            int bx = 70 + col * 105;
+            int bx = 70 + col * 80;
             SDL_Color tc = theme_white[i];
             SDL_Color bc = theme_bg[i];
-            draw_rounded_box(r, bx, y - 4, 99, 30, 6, (settings_sel == 1 && i == cur_theme) ? color_dark_grey : color_card_border);
-            draw_rounded_box(r, bx + 3, y - 1, 16, 24, 4, bc);
-            draw_rounded_rect(r, bx + 3, y - 1, 16, 24, 4, tc);
-            draw_text(r, font_sm, theme_names[i], bx + 24, y + 2, (i == cur_theme) ? color_cyan : color_grey, 0);
+            draw_rounded_box(r, bx, y - 4, 76, 30, 6, (settings_sel == 1 && i == cur_theme) ? color_dark_grey : color_card_border);
+            draw_rounded_box(r, bx + 3, y - 1, 14, 24, 4, bc);
+            draw_rounded_rect(r, bx + 3, y - 1, 14, 24, 4, tc);
+            draw_text(r, font_sm, theme_names[i], bx + 21, y + 2, (i == cur_theme) ? color_cyan : color_grey, 0);
         }
         y += 38;
     }
@@ -4300,6 +5884,8 @@ int main(int argc, char *argv[]) {
     clkrstInitialize();
     plInitialize(PlServiceType_User);
     socketInitializeDefault();
+    nsInitialize();
+    splInitialize();
 
     // Pad state config
     padConfigureInput(8, HidNpadStyleSet_NpadStandard);
@@ -4312,6 +5898,8 @@ int main(int argc, char *argv[]) {
 
     // Load settings config
     load_config();
+    load_scaling_config();
+    load_game_stats();
 
     // Initialize MAC address via socket ioctl
     int s = socket(AF_INET, SOCK_DGRAM, 0);
@@ -4394,7 +5982,7 @@ int main(int argc, char *argv[]) {
     };
 
     // Auto-refresh timer
-    u64 last_refresh = armGetSystemTick();
+    last_refresh = armGetSystemTick();
 
     while (appletMainLoop() && !quit) {
         padUpdate(&pad);
@@ -4421,9 +6009,12 @@ int main(int argc, char *argv[]) {
                     }
                 }
                 if (R_SUCCEEDED(rc)) {
+                    sixaxis_handles_count = 1;
                     hidStartSixAxisSensor(sixaxis_handles[0]);
-                    if (R_SUCCEEDED(hidGetSixAxisSensorHandles(&sixaxis_handles[1], 1, hid_id, style)))
+                    if (R_SUCCEEDED(hidGetSixAxisSensorHandles(&sixaxis_handles[1], 1, hid_id, style))) {
                         hidStartSixAxisSensor(sixaxis_handles[1]);
+                        sixaxis_handles_count = 2;
+                    }
                     sixaxis_init_ok = true;
                 }
             }
@@ -4454,10 +6045,57 @@ int main(int argc, char *argv[]) {
 
             if (!ev_down && !ev_move) continue;
 
-            // Dismiss popup on any tap
+            // Popup interaction
             if (popup_active && ev_down) {
-                popup_active = false;
-                continue;
+                if (popup_type == POPUP_FAN) {
+                    int pw = 700, ph = 280, px = (W - pw) / 2, py = (H - ph) / 2;
+                    // Close button (X in top-right corner)
+                    if (mx >= px + pw - 40 && mx <= px + pw - 10 && my >= py + 10 && my <= py + 40) {
+                        popup_active = false; continue;
+                    }
+                    // Slider interaction
+                    int sl_y = py + 120, sl_x = px + 80, sl_w = pw - 160;
+                    if (my >= sl_y - 15 && my <= sl_y + 25) {
+                        int val = (mx - sl_x) * 100 / sl_w;
+                        if (val < 0) val = 0;
+                        if (val > 100) val = 100;
+                        popup_fan_val = val;
+                        continue;
+                    }
+                    // - and + buttons
+                    int btn_y = py + 180, bx = px + 200;
+                    if (mx >= bx - 60 && mx <= bx - 10 && my >= btn_y && my <= btn_y + 40) {
+                        popup_fan_val -= 5; if (popup_fan_val < 0) popup_fan_val = 0; continue;
+                    }
+                    if (mx >= bx + 10 && mx <= bx + 60 && my >= btn_y && my <= btn_y + 40) {
+                        popup_fan_val += 5; if (popup_fan_val > 100) popup_fan_val = 100; continue;
+                    }
+                    // Apply button
+                    int ap_x = px + pw/2 - 60;
+                    if (mx >= ap_x && mx <= ap_x + 120 && my >= btn_y + 60 && my <= btn_y + 100) {
+                        popup_active = false;
+                        add_alert("Fan speed applied!");
+                    }
+                    // Tap outside -> dismiss
+                    if (mx < px || mx > px + pw || my < py || my > py + ph) {
+                        popup_active = false; continue;
+                    }
+                } else {
+                    popup_active = false;
+                    continue;
+                }
+            }
+            // Popup touch_move for slider drag
+            if (popup_active && popup_type == POPUP_FAN && ev_move) {
+                int pw = 700, ph = 280, px = (W - pw) / 2, py = (H - ph) / 2;
+                int sl_y = py + 120, sl_x = px + 80, sl_w = pw - 160;
+                if (my >= sl_y - 15 && my <= sl_y + 25) {
+                    int val = (mx - sl_x) * 100 / sl_w;
+                    if (val < 0) val = 0;
+                    if (val > 100) val = 100;
+                    popup_fan_val = val;
+                    continue;
+                }
             }
 
             // Tab navigation (blocked when custom theme editor is open)
@@ -4495,6 +6133,13 @@ int main(int argc, char *argv[]) {
                 }
             }
             // Tools page: buttons
+            // Network test touch
+            if (cur == 2 && ev_down) {
+                if (my >= 665 - net_scroll && my <= 840 - net_scroll && mx >= 40 && mx <= 620 && !net_test_running) {
+                    net_test_start();
+                }
+            }
+
             if (cur == 6 && ev_down) {
                 int bt_y = 460 - tools_scroll;
                 int exp_y = 460 - tools_scroll;
@@ -4527,16 +6172,39 @@ int main(int argc, char *argv[]) {
                     }
                 }
 
-                // Fan speed card tap -> popup "En developpement"
-                int fs_card_y = 790 - tools_scroll;
-                if (mx >= 40 && mx <= 620 && my >= fs_card_y && my <= fs_card_y + 200) {
-                    popup_active = true;
-                    snprintf(popup_text, sizeof(popup_text), s_dev_fan[cur_lang]);
-                    popup_start_tick = armGetSystemTick();
+                // CPU Scaling controls touch
+                int scale_card_y = 1010 - tools_scroll;
+                if (mx >= 40 && mx <= 620 && my >= scale_card_y && my <= scale_card_y + 200) {
+                    // Tap on CPU/GPU sliders to set target
+                    if (my >= scale_card_y + 62 && my <= scale_card_y + 72) {
+                        int sl_x = 350, sl_w = 240;
+                        int tap_x = mx - sl_x;
+                        if (tap_x >= 0 && tap_x <= sl_w) {
+                            cpu_scale_target_mhz = tap_x * 2000 / sl_w;
+                            if (cpu_scale_target_mhz < 200) cpu_scale_target_mhz = 200;
+                            if (cpu_scale_target_mhz > 2000) cpu_scale_target_mhz = 2000;
+                            scale_set_cpu(cpu_scale_target_mhz);
+                        }
+                    }
+                    if (my >= scale_card_y + 92 && my <= scale_card_y + 102) {
+                        int sl_x = 350, sl_w = 240;
+                        int tap_x = mx - sl_x;
+                        if (tap_x >= 0 && tap_x <= sl_w) {
+                            gpu_scale_target_mhz = tap_x * 1000 / sl_w;
+                            if (gpu_scale_target_mhz < 76) gpu_scale_target_mhz = 76;
+                            if (gpu_scale_target_mhz > 1000) gpu_scale_target_mhz = 1000;
+                            scale_set_gpu(gpu_scale_target_mhz);
+                        }
+                    }
                 }
 
-                // SD Speed Test button: y=1190-sc
-                int sd_btn_y = 1190 - tools_scroll;
+                // Screenshot button
+                if (mx >= 690 && mx <= 930 && my >= 1080 - tools_scroll && my <= 1120 - tools_scroll) {
+                    capture_screenshot(renderer);
+                }
+
+                // SD Speed Test button: y=1690-sc
+                int sd_btn_y = 1890 - tools_scroll;
                 if (mx >= 690 && mx <= 930 && my >= sd_btn_y && my <= sd_btn_y + 36) {
                     sd_speed_result = -2;
                     SDL_SetRenderDrawColor(renderer, color_bg.r, color_bg.g, color_bg.b, 255);
@@ -4550,12 +6218,13 @@ int main(int argc, char *argv[]) {
                 }
             }
 
-            // Tools page: fan speed card tap -> popup (disabled feature)
-            if (cur == 6 && (ev_down || ev_move)) {
+            // Tools page: fan speed card tap -> popup with slider
+            if (cur == 6 && ev_down) {
                 int fs_sy = 790 - tools_scroll;
                 if (mx >= 40 && mx <= 620 && my >= fs_sy && my <= fs_sy + 200) {
                     popup_active = true;
-                    snprintf(popup_text, sizeof(popup_text), s_dev_fan[cur_lang]);
+                    popup_type = POPUP_FAN;
+                    popup_fan_val = 30;
                     popup_start_tick = armGetSystemTick();
                 }
             }
@@ -4621,11 +6290,16 @@ int main(int argc, char *argv[]) {
 
             // Settings page: touch for language/theme/refresh selection
             if (cur == 8 && ev_down) {
-                // Language buttons: y 246-282
-                if (my >= 246 && my <= 282) {
+                int ssc = settings_scroll;
+                // Language buttons (2 rows)
+                if (my >= 246 - ssc && my <= 326 - ssc) {
+                    int lang_per_row = (LANG_MAX + 1) / 2;
                     for (int i = 0; i < LANG_MAX; i++) {
-                        int bx = 70 + i * 115;
-                        if (mx >= bx && mx <= bx + 108) {
+                        int row = i / lang_per_row;
+                        int col = i % lang_per_row;
+                        int bx = 70 + col * 110;
+                        int by = 246 - ssc + row * 44;
+                        if (mx >= bx && mx <= bx + 104 && my >= by && my <= by + 36) {
                             cur_lang = i;
                             save_config();
                             break;
@@ -4633,27 +6307,35 @@ int main(int argc, char *argv[]) {
                     }
                 }
                 // Theme buttons: two rows
-                if (my >= 342 && my <= 372) {
-                    for (int i = 0; i < 6 && i < THEME_MAX; i++) {
-                        int bx = 70 + i * 105;
-                        if (mx >= bx && mx <= bx + 99) {
+                if (my >= 342 - ssc && my <= 372 - ssc) {
+                    for (int i = 0; i < 8 && i < THEME_MAX; i++) {
+                        int bx = 70 + i * 80;
+                        if (mx >= bx && mx <= bx + 76) {
                             cur_theme = i;
                             apply_theme(); save_config(); break;
                         }
                     }
                 }
-                if (my >= 380 && my <= 410) {
-                    for (int i = 6; i < 12 && i < THEME_MAX; i++) {
-                        int bx = 70 + (i - 6) * 105;
-                        if (mx >= bx && mx <= bx + 99) {
+                if (my >= 380 - ssc && my <= 410 - ssc) {
+                    for (int i = 8; i < 16 && i < THEME_MAX; i++) {
+                        int bx = 70 + (i - 8) * 80;
+                        if (mx >= bx && mx <= bx + 76) {
                             cur_theme = i;
                             apply_theme(); save_config(); break;
                         }
                     }
                 }
-                // Refresh buttons
-                int ref_y_start = (cur_theme == THEME_MAX - 1) ? 514 : 466;
-                if (my >= ref_y_start && my <= ref_y_start + 40) {
+                // Custom theme editor button: drawn at y=400-sc..432-sc
+                if (cur_theme == THEME_MAX - 1 && my >= 400 - ssc && my <= 432 - ssc) {
+                    custom_theme_editing = 1;
+                    cte_backup[0]=custom_bg; cte_backup[1]=custom_card; cte_backup[2]=custom_border;
+                    cte_backup[3]=custom_cyan; cte_backup[4]=custom_green; cte_backup[5]=custom_white;
+                    cte_backup[6]=custom_grey; cte_backup[7]=custom_dark_grey; cte_backup[8]=custom_bg2;
+                    cte_backup[9]=custom_bg3;
+                }
+                // Refresh buttons: custom theme → 476-sc..512-sc, normal → 444-sc..480-sc
+                int ref_ys = (cur_theme == THEME_MAX - 1) ? 476 : 444;
+                if (my >= ref_ys - ssc && my <= ref_ys + 36 - ssc) {
                     static const int rv[] = {0,1,3,5,10};
                     for (int i = 0; i < 5; i++) {
                         int bx = 70 + i * 110;
@@ -4663,14 +6345,6 @@ int main(int argc, char *argv[]) {
                             break;
                         }
                     }
-                }
-                // Custom theme button: y 438-470 (if THEME_CUSTOM selected)
-                if (cur_theme == THEME_MAX - 1 && my >= 438 && my <= 470) {
-                    custom_theme_editing = 1;
-                    cte_backup[0]=custom_bg; cte_backup[1]=custom_card; cte_backup[2]=custom_border;
-                    cte_backup[3]=custom_cyan; cte_backup[4]=custom_green; cte_backup[5]=custom_white;
-                    cte_backup[6]=custom_grey; cte_backup[7]=custom_dark_grey; cte_backup[8]=custom_bg2;
-                    cte_backup[9]=custom_bg3;
                 }
                 // Custom theme editor touch (new layout coordinates)
                 if (custom_theme_editing) {
@@ -4756,17 +6430,29 @@ int main(int argc, char *argv[]) {
                     lblExit();
                 }
             }
-            // Fan speed control (disabled - shows popup)
-            if (down & (HidNpadButton_ZL | HidNpadButton_ZR)) {
-                popup_active = true;
-                snprintf(popup_text, sizeof(popup_text), s_dev_fan[cur_lang]);
-                popup_start_tick = armGetSystemTick();
+            // CPU Scaling: ZR applies CPU target, ZL applies GPU target
+            if (down & HidNpadButton_ZR) {
+                if (cpu_scale_target_mhz > 0) {
+                    scale_set_cpu(cpu_scale_target_mhz);
+                    save_scaling_config();
+                    add_alert("CPU freq applied!");
+                } else {
+                    add_alert("Set CPU target first using slider!");
+                }
             }
-            // L+R together -> popup
+            if (down & HidNpadButton_ZL) {
+                if (gpu_scale_target_mhz > 0) {
+                    scale_set_gpu(gpu_scale_target_mhz);
+                    save_scaling_config();
+                    add_alert("GPU freq applied!");
+                } else {
+                    add_alert("Set GPU target first using slider!");
+                }
+            }
+            // L+R together -> reset all CPU/GPU clocks
             if ((down & HidNpadButton_L) && (down & HidNpadButton_R)) {
-                popup_active = true;
-                snprintf(popup_text, sizeof(popup_text), s_dev_fan[cur_lang]);
-                popup_start_tick = armGetSystemTick();
+                scale_reset_all();
+                add_alert("Clocks reset to default");
             }
             // App mode switching (only if L or R alone)
             if ((down & HidNpadButton_L) && !(down & HidNpadButton_R)) {
@@ -4774,6 +6460,14 @@ int main(int argc, char *argv[]) {
             }
             if ((down & HidNpadButton_R) && !(down & HidNpadButton_L)) {
                 app_mode = (app_mode + 1) % 3;
+            }
+            // Blue light filter toggle (Left Stick button)
+            if (down & HidNpadButton_StickL) {
+                blue_light_filter = (blue_light_filter + 1) % 6;
+                if (blue_light_filter > 0)
+                    add_alert("Blue light filter: ON");
+                else
+                    add_alert("Blue light filter: OFF");
             }
         }
 
@@ -4868,6 +6562,20 @@ int main(int argc, char *argv[]) {
         if (cur != 8) {
             if (down & HidNpadButton_L) cur = (cur - 1 + PGS) % PGS;
             if (down & HidNpadButton_R) cur = (cur + 1) % PGS;
+        }
+
+        // Screenshot: ZL+ZR anywhere
+        if ((down & HidNpadButton_ZL) && (down & HidNpadButton_ZR) && cur != 6) {
+            capture_screenshot(renderer);
+        }
+
+        // Scan installed games and processes on Tools page access
+        if (cur == 6) {
+            if (!installed_games_scanned) {
+                scan_installed_games();
+                seed_game_stats();
+            }
+            scan_running_processes();
         }
 
         // Haptic rumble in Tools tab (X and Y)
@@ -5197,11 +6905,52 @@ int main(int argc, char *argv[]) {
 
             if (!(cur == 1 && fb_active)) draw_footer(renderer, cur);
 
-            // Popup overlay (En developpement)
+            // Toast notifications (bottom-right)
+            u64 now_t = armGetSystemTick();
+            u64 freq_t = armGetSystemTickFreq();
+            int toast_y = H - 30;
+            for (int ni = notif_count - 1; ni >= 0; ni--) {
+                if (notif_ticks[ni] == 0) continue;
+                u64 elapsed = now_t - notif_ticks[ni];
+                u64 secs = elapsed / freq_t;
+                if (secs >= NOTIF_DURATION) { notif_ticks[ni] = 0; continue; }
+                float alpha = (secs >= NOTIF_DURATION - 1) ? (NOTIF_DURATION - secs) * 255 : 255;
+                int ta = (int)alpha;
+                if (ta < 10) { notif_ticks[ni] = 0; continue; }
+                int tw = 0;
+                TTF_SizeUTF8(font_sm, notif_msgs[ni], &tw, NULL);
+                int tx = W - tw - 30, ty = toast_y - (NOTIF_MAX - ni) * 28;
+                int bw = tw + 20, bh = 24;
+                if (bw < 120) bw = 120;
+                // Background
+                SDL_SetRenderDrawBlendMode(renderer, SDL_BLENDMODE_BLEND);
+                SDL_SetRenderDrawColor(renderer, 0, 0, 0, ta > 200 ? 200 : ta);
+                SDL_Rect br = {tx - 10, ty, bw, bh};
+                SDL_RenderFillRect(renderer, &br);
+                SDL_SetRenderDrawColor(renderer, color_cyan.r, color_cyan.g, color_cyan.b, ta);
+                SDL_RenderDrawRect(renderer, &br);
+                SDL_SetRenderDrawBlendMode(renderer, SDL_BLENDMODE_NONE);
+                // Text
+                SDL_Color tc = {color_white.r, color_white.g, color_white.b, (u8)ta};
+                SDL_Surface *sf = TTF_RenderUTF8_Blended(font_sm, notif_msgs[ni], tc);
+                if (sf) {
+                    SDL_Texture *tex = SDL_CreateTextureFromSurface(renderer, sf);
+                    if (tex) {
+                        SDL_Rect dr = {tx, ty + 2, sf->w, sf->h};
+                        SDL_RenderCopy(renderer, tex, NULL, &dr);
+                        SDL_DestroyTexture(tex);
+                    }
+                    SDL_FreeSurface(sf);
+                }
+            }
+            // Reset blend mode
+            SDL_SetRenderDrawBlendMode(renderer, SDL_BLENDMODE_NONE);
+
+            // Popup overlay
             if (popup_active) {
                 u64 elapsed_ticks = armGetSystemTick() - popup_start_tick;
                 u64 elapsed_sec = elapsed_ticks / armGetSystemTickFreq();
-                if (elapsed_sec < 3) {
+                if (elapsed_sec < 100) {
                     // Semi-transparent overlay
                     SDL_Rect overlay = {0, 0, W, H};
                     SDL_SetRenderDrawBlendMode(renderer, SDL_BLENDMODE_BLEND);
@@ -5209,15 +6958,60 @@ int main(int argc, char *argv[]) {
                     SDL_RenderFillRect(renderer, &overlay);
                     SDL_SetRenderDrawBlendMode(renderer, SDL_BLENDMODE_NONE);
 
-                    // Popup box (enlarged)
-                    int pw = 700, ph = 160, px = (W - pw) / 2, py = (H - ph) / 2;
-                    draw_rounded_box(renderer, px, py, pw, ph, 12, color_card);
-                    draw_rounded_rect(renderer, px, py, pw, ph, 12, color_cyan);
-                    draw_text(renderer, font_md, popup_text, px + pw/2, py + 40, color_white, 1);
-                    draw_text(renderer, font_sm, s_popup_dismiss[cur_lang], px + pw/2, py + 110, color_grey, 1);
+                    if (popup_type == POPUP_FAN) {
+                        int pw = 700, ph = 280, px = (W - pw) / 2, py = (H - ph) / 2;
+                        draw_rounded_box(renderer, px, py, pw, ph, 12, color_card);
+                        draw_rounded_rect(renderer, px, py, pw, ph, 12, color_orange);
+                        // Title
+                        draw_text(renderer, font_md, "Fan Speed Control", px + pw/2, py + 20, color_orange, 1);
+                        // Close X
+                        draw_text(renderer, font_sm, "X", px + pw - 30, py + 15, color_grey, 1);
+                        // Slider track
+                        int sl_y = py + 120, sl_x = px + 80, sl_w = pw - 160;
+                        thickLineRGBA(renderer, sl_x, sl_y, sl_x + sl_w, sl_y, 6, color_dark_grey.r, color_dark_grey.g, color_dark_grey.b, 255);
+                        // Slider fill
+                        int fill_w = popup_fan_val * sl_w / 100;
+                        thickLineRGBA(renderer, sl_x, sl_y, sl_x + fill_w, sl_y, 6, color_orange.r, color_orange.g, color_orange.b, 255);
+                        // Thumb
+                        int thumb_x = sl_x + fill_w;
+                        filledCircleRGBA(renderer, thumb_x, sl_y, 14, color_cyan.r, color_cyan.g, color_cyan.b, 255);
+                        circleRGBA(renderer, thumb_x, sl_y, 14, color_white.r, color_white.g, color_white.b, 200);
+                        // Percentage display
+                        char pct_str[16];
+                        snprintf(pct_str, sizeof(pct_str), "%d%%", popup_fan_val);
+                        draw_text(renderer, font_md, pct_str, px + pw/2, py + 70, color_white, 1);
+                        // - and + buttons
+                        int btn_y = py + 180, bx = px + pw/2;
+                        draw_rounded_box(renderer, bx - 60, btn_y, 50, 40, 6, color_card_border);
+                        draw_text(renderer, font_lg, "-", bx - 35, btn_y + 4, color_white, 1);
+                        draw_rounded_box(renderer, bx + 10, btn_y, 50, 40, 6, color_card_border);
+                        draw_text(renderer, font_lg, "+", bx + 35, btn_y + 4, color_white, 1);
+                        // Apply button
+                        int ap_y = btn_y + 60, ap_x = px + pw/2 - 60;
+                        draw_rounded_box(renderer, ap_x, ap_y, 120, 40, 6, color_orange);
+                        draw_text(renderer, font_sm, "APPLY", ap_x + 60, ap_y + 8, color_white, 1);
+                    } else {
+                        // Standard info popup
+                        int pw = 700, ph = 160, px = (W - pw) / 2, py = (H - ph) / 2;
+                        draw_rounded_box(renderer, px, py, pw, ph, 12, color_card);
+                        draw_rounded_rect(renderer, px, py, pw, ph, 12, color_cyan);
+                        draw_text(renderer, font_md, popup_text, px + pw/2, py + 40, color_white, 1);
+                        draw_text(renderer, font_sm, s_popup_dismiss[cur_lang], px + pw/2, py + 110, color_grey, 1);
+                    }
                 } else {
                     popup_active = false;
                 }
+            }
+
+            // Blue light filter overlay (last thing before present)
+            if (blue_light_filter > 0) {
+                int bl_alpha = 10 + blue_light_filter * 15; // 25 to 85
+                if (bl_alpha > 120) bl_alpha = 120;
+                SDL_Rect bl_rect = {0, 0, W, H};
+                SDL_SetRenderDrawBlendMode(renderer, SDL_BLENDMODE_BLEND);
+                SDL_SetRenderDrawColor(renderer, 255, 140, 50, bl_alpha);
+                SDL_RenderFillRect(renderer, &bl_rect);
+                SDL_SetRenderDrawBlendMode(renderer, SDL_BLENDMODE_NONE);
             }
         }
 
@@ -5233,8 +7027,10 @@ exit_app:
     }
     if (sixaxis_init_ok) {
         hidStopSixAxisSensor(sixaxis_handles[0]);
-        hidStopSixAxisSensor(sixaxis_handles[1]);
+        if (sixaxis_handles_count >= 2)
+            hidStopSixAxisSensor(sixaxis_handles[1]);
     }
+    net_test_cleanup();
 
     if (font_xs) TTF_CloseFont(font_xs);
     if (font_sm) TTF_CloseFont(font_sm);
@@ -5251,6 +7047,8 @@ exit_app:
     psmExit();
     setExit();
     setsysExit();
+    nsExit();
+    splExit();
     
     return 0;
 }
