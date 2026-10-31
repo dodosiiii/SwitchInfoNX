@@ -64,6 +64,8 @@ private:
     uint32_t counter;
     std::map<MtpObjectHandle, DbEntry> db;
     std::map<std::string, MtpObjectFormat> formats = {
+        {".nro", MTP_FORMAT_EXECUTABLE},
+        {".nso", MTP_FORMAT_EXECUTABLE},
         {".gif", MTP_FORMAT_GIF},
         {".png", MTP_FORMAT_PNG},
         {".jpeg", MTP_FORMAT_JFIF},

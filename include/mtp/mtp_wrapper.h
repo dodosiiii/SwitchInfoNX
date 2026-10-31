@@ -16,6 +16,8 @@ extern volatile int mtp_xfer_active;
 extern volatile u64 mtp_xfer_done;
 extern volatile u64 mtp_xfer_total;
 extern volatile char mtp_xfer_filename[256];
+void mtp_report_activity(const char *action, const char *path, u64 bytes);
+void mtp_report_event(const char *message);
 
 #ifdef __cplusplus
 }

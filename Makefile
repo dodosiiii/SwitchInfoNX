@@ -4,7 +4,7 @@ INCLUDES	:=	include include/mtp
 
 TITLE		:=	Switch Info NX
 AUTHOR		:=	dodosi
-VERSION		:=	0.3
+VERSION		:=	0.4
 
 ICON		:=	icon.jpg
 
@@ -31,7 +31,7 @@ ASFLAGS		:=	-g $(ARCH)
 LDFLAGS		:=	-specs="$(DEVKITPRO)/libnx/switch.specs" $(ARCH)
 LDFLAGS		+=	-Wl,-Map,$(TARGET).map -Wl,--gc-sections
 
-LIBS		:=	-lSDL2_ttf -lSDL2_gfx -lSDL2 -lharfbuzz -lfreetype -lbz2 -lpng -lz -lEGL -lstdc++ -lstdc++fs -lglapi -ldrm_nouveau -lnx -lm
+LIBS		:=	-lSDL2_ttf -lSDL2_gfx -lSDL2 -ljpeg -lharfbuzz -lfreetype -lbz2 -lpng -lz -lEGL -lstdc++ -lstdc++fs -lglapi -ldrm_nouveau -lnx -lm
 
 LIBDIRS		:=	-L"$(DEVKITPRO)/libnx/lib" -L"$(DEVKITPRO)/portlibs/switch/lib"
 

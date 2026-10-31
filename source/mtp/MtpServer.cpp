@@ -104,6 +104,7 @@ MtpServer::MtpServer(USBMtpInterface* usb, MtpDatabase* database, bool ptp,
                     int fileGroup, int filePerm, int directoryPerm)
     :   mUSB(usb),
         mDatabase(database),
+        mRunning(true),
         mPtp(ptp),
         mFileGroup(fileGroup),
         mFilePermission(filePerm),
@@ -164,10 +165,9 @@ void MtpServer::run() {
 
     VLOG(1) << "MtpServer::run";
 
-    mRunning = true;
     while (mRunning) {
         
-        consoleUpdate(NULL);
+        // consoleUpdate removed in v0.4
                 
         int ret = mRequest.read(usb);
         if (ret < 0) {
@@ -856,6 +856,7 @@ MtpResponseCode MtpServer::doGetObject() {
     struct mtp_file_range mfr;
     mfr.fd = open(pathBuf.c_str(), O_RDONLY);
     if (mfr.fd < 0) {
+        mtp_report_event("MTP download: open failed");
         return MTP_RESPONSE_GENERAL_ERROR;
     }
     mfr.offset = 0;
@@ -868,11 +869,13 @@ MtpResponseCode MtpServer::doGetObject() {
     VLOG(2) << "MTP_SEND_FILE_WITH_HEADER returned " << ret;
     close(mfr.fd);
     if (ret < 0) {
+        mtp_report_event("MTP download interrupted");
         if (errno == ECANCELED)
             return MTP_RESPONSE_TRANSACTION_CANCELLED;
         else
             return MTP_RESPONSE_GENERAL_ERROR;
     }
+    mtp_report_activity("DOWNLOAD", pathBuf.c_str(), (u64)fileLength);
     return MTP_RESPONSE_OK;
 }
 
@@ -1109,6 +1112,10 @@ done:
 
     mDatabase->endSendObject(mSendObjectFilePath, mSendObjectHandle, mSendObjectFormat,
             result == MTP_RESPONSE_OK);
+    if (result == MTP_RESPONSE_OK)
+        mtp_report_activity("UPLOAD", mSendObjectFilePath.c_str(), (u64)mSendObjectFileSize);
+    else
+        mtp_report_event("MTP upload failed");
     mSendObjectHandle = kInvalidObjectHandle;
     mSendObjectFormat = 0;
     return result;

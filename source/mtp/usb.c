@@ -56,6 +56,10 @@ Result usbInitialize(struct usb_device_descriptor *device_descriptor, u32 num_in
     } else if (num_interfaces > TOTAL_INTERFACES) {
         rc = MAKERESULT(Module_Libnx, LibnxError_OutOfMemory);
     } else {
+        // Endpoint numbers belong to one USB device session. Reusing stale
+        // numbers after an MTP stop/start can produce invalid descriptors.
+        ep_in = 1;
+        ep_out = 1;
         rc = usbDsInitialize();
         
         if (R_SUCCEEDED(rc)) {
@@ -319,7 +323,7 @@ static Result _usbCommsTransfer(usbCommsEndpoint *ep, UsbDirection dir, const vo
     UsbDsReportData reportdata;
 
     //Makes sure endpoints are ready for data-transfer / wait for init if needed.
-    rc = usbDsWaitReady(UINT64_MAX);
+    rc = usbDsWaitReady(100000000ULL);
     if (R_FAILED(rc)) return rc;
 
     while(size)
@@ -355,7 +359,7 @@ static Result _usbCommsTransfer(usbCommsEndpoint *ep, UsbDirection dir, const vo
         if (R_FAILED(rc))
         {
             usbDsEndpoint_Cancel(ep->endpoint);
-            eventWait(&ep->endpoint->CompletionEvent, UINT64_MAX);
+            eventWait(&ep->endpoint->CompletionEvent, 100000000ULL);
             eventClear(&ep->endpoint->CompletionEvent);
             return rc;
         }
@@ -411,12 +415,10 @@ size_t usbTransfer(u32 interface, u32 endpoint, UsbDirection dir, void* buffer, 
                 rwlockWriteUnlock(&ep->lock);
             }
         }
+        // v0.4: Safe error return instead of kernel panic
         if (R_FAILED(rc) && g_usbCommsErrorHandling)
         {
-            if(dir == UsbDirection_Write)
-                diagAbortWithResult(MAKERESULT(Module_Libnx, LibnxError_BadUsbCommsWrite));
-            else
-                diagAbortWithResult(MAKERESULT(Module_Libnx, LibnxError_BadUsbCommsRead));
+            return 0;
         }
     }
     return transferredSize;

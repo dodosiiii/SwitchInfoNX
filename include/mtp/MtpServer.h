@@ -26,6 +26,7 @@
 #include "USBMtpInterface.h"
 
 #include <unistd.h>
+#include <atomic>
 
 namespace android {
 
@@ -41,7 +42,7 @@ private:
     MtpDatabase*        mDatabase;
 
     // keep state whether the server should be running
-    bool                mRunning;
+    std::atomic<bool>   mRunning;
 
     // appear as a PTP device
     bool                mPtp;

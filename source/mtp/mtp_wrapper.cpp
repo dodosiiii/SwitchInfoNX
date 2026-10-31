@@ -1,4 +1,7 @@
 #include <thread>
+#include <mutex>
+#include <atomic>
+#include <new>
 #include <cstring>
 
 #include "mtp/mtp_wrapper.h"
@@ -22,7 +25,9 @@ static MtpServer *g_server = NULL;
 static MtpStorage *g_storage = NULL;
 static SwitchMtpDatabase *g_database = NULL;
 static std::thread *g_thread = NULL;
-static bool g_running = false;
+static std::atomic<bool> g_running(false);
+static std::atomic<bool> g_stop_requested(false);
+static std::mutex g_server_mutex;
 
 static void mtp_thread_func(void) {
     struct usb_device_descriptor device_desc = {
@@ -34,7 +39,7 @@ static void mtp_thread_func(void) {
         .bDeviceProtocol = 0x00,
         .bMaxPacketSize0 = 0x40,
         .idVendor = 0x057e,
-        .idProduct = 0x4000,
+        .idProduct = 0x3000,
         .bcdDevice = 0x0100,
         .bNumConfigurations = 0x01
     };
@@ -64,7 +69,7 @@ static void mtp_thread_func(void) {
     g_database = new SwitchMtpDatabase();
     g_database->addStoragePath("sdmc:/", "SD Card", MTP_STORAGE_REMOVABLE_RAM, true);
 
-    g_server = new MtpServer(
+    MtpServer *server = new (std::nothrow) MtpServer(
         mtp_interface,
         g_database,
         false,
@@ -73,13 +78,29 @@ static void mtp_thread_func(void) {
         0
     );
 
-    g_server->addStorage(g_storage);
+    if (!server) {
+        delete g_database; g_database = NULL;
+        delete g_storage; g_storage = NULL;
+        delete mtp_interface;
+        usbExit();
+        g_running = false;
+        return;
+    }
+    server->addStorage(g_storage);
+    {
+        std::lock_guard<std::mutex> lock(g_server_mutex);
+        g_server = server;
+    }
     g_running = true;
-    g_server->run();
+    if (!g_stop_requested.load())
+        server->run();
 
     // Cleanup after run() returns
-    delete g_server;
-    g_server = NULL;
+    {
+        std::lock_guard<std::mutex> lock(g_server_mutex);
+        g_server = NULL;
+    }
+    delete server;
     delete g_database;
     g_database = NULL;
     delete g_storage;
@@ -91,18 +112,33 @@ static void mtp_thread_func(void) {
 }
 
 Result mtp_server_start(void) {
-    if (g_running || g_thread) return 0;
+    if (g_running) return 0;
+    // A failed USB initialization leaves the worker joinable but stopped.
+    // Reap that worker so a later retry can actually start a fresh session.
+    if (g_thread) {
+        if (g_thread->joinable()) g_thread->join();
+        delete g_thread;
+        g_thread = NULL;
+    }
+    g_stop_requested = false;
+    try {
+        g_thread = new std::thread(mtp_thread_func);
+    } catch (...) {
+        g_thread = NULL;
+        return MAKERESULT(Module_Libnx, LibnxError_OutOfMemory);
+    }
 
-    g_thread = new std::thread(mtp_thread_func);
-    if (!g_thread) return MAKERESULT(Module_Libnx, LibnxError_OutOfMemory);
-
-    svcSleepThread(500000000);
+    // non-blocking start
     return 0;
 }
 
 void mtp_server_stop(void) {
-    if (g_server) {
-        g_server->stop();
+    g_stop_requested = true;
+    g_running = false;
+    {
+        std::lock_guard<std::mutex> lock(g_server_mutex);
+        if (g_server)
+            g_server->stop();
     }
     if (g_thread) {
         if (g_thread->joinable())
@@ -110,9 +146,8 @@ void mtp_server_stop(void) {
         delete g_thread;
         g_thread = NULL;
     }
-    g_running = false;
 }
 
 bool mtp_server_is_running(void) {
-    return g_running;
+    return g_running.load();
 }
