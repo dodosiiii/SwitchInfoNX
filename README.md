@@ -20,43 +20,43 @@ SwitchInfoNX is a feature-rich homebrew application that turns your Nintendo Swi
 
 ---
 
-## ✨ Features (v0.4)
+##  Features (v0.4)
 
-### 🖥️ System Information & Deep Hardware
+###  System Information & Deep Hardware
 * **Firmware & Hardware**: Firmware version, serial number, hardware type (Erista V1 / Mariko V2 / Switch Lite / Switch OLED), region, system language, device nickname.
 * **Environment Detection**: Real-time detection of **EmuMMC (Active)** vs **SysNAND**.
 * **Battery Health Diagnostics**: Live battery percentage, charging state, **Battery Health %** estimation, raw voltage in **mV**, and real-time charge/discharge current (**mA**).
 * **Thermal Monitoring**: Skin & SoC internal temperature readings, dynamic color coding (Normal / Warm / Hot), thermal threshold alerts.
 
-### 💽 Storage & File Browser
+###  Storage & File Browser
 * **Storage Insights**: SD card usage, NAND partitions (USER / SYSTEM / SAFE), SD read speed test benchmark.
 * **Integrated File Browser**: Full SD card file manager with unified byte calculations (B/KB/MB/GB), folder navigation, copy/cut/paste, rename, and file deletion.
 
-### 🌐 Network & Latency Diagnostics
+###  Network & Latency Diagnostics
 * **Network Status**: IP & MAC addresses, connection type, SSID, Wi-Fi signal strength history graph (60s).
 * **Speed & Latency**: Real-time latency measurement (**ping in ms** to public DNS), download/upload throughput test.
 
-### ⚡ Performance & Hardware Gauges
+###  Performance & Hardware Gauges
 * **Live Clock Speeds**: Real-time CPU, GPU, and EMC memory clock frequencies.
 * **Performance Graphs**: 60-frame live FPS chart, RAM usage gauge, CPU/GPU load score, and historical thermal tracking.
 * **Clock Scaling Controls**: Manual CPU/GPU clock target adjustment sliders.
 
-### 🎮 Controller Diagnostics & Stick Drift Detector
+###  Controller Diagnostics & Stick Drift Detector
 * **Interactive Controller Test**: Live button state mapping, analog trigger visualization, gyroscope & accelerometer 6-axis readout.
 * **Stick Drift & Deadzone Visualizer**: Circular analog stick bounds with deadzone overlay, drift deviation percentage, and center state indicator.
 
-### 📁 Transfer Protocols
+###  Transfer Protocols
 * **MTP USB Transfer**: Built-in Media Transfer Protocol server over USB for high-speed drag-and-drop file transfers with PC.
 * **Wi-Fi FTP Server**: Dual-mode FTP / FTPD server with compatible command handling, reliable uploads and folder creation, tuned transfer buffers, and live progress / speed feedback on the Switch.
 
-### 🎨 Modern UI & Custom Themes
+###  Modern UI & Custom Themes
 * **Modern Dashboard**: Sleek pill-based navigation tab bar, high-definition cards, continuous vertical scrollbars, and floating translucent toast alerts.
 * **17 Built-in Presets**: Including **OLED Pure Black** (true black `#000000` power-saving mode) and **Cyberpunk Neon**, plus a full 10-slot real-time RGB custom theme editor.
 * **Internationalization**: 11 languages supported (English, French, Italian, Spanish, German, Portuguese, Dutch, Japanese, Russian, Chinese, Korean).
 
 ---
 
-## 📦 Installation
+##  Installation
 
 1. Download the latest `SwitchInfoNX.nro` from [Releases](https://github.com/dodosiiii/SwitchInfoNX/releases)
 2. Copy it to `sdmc:/switch/SwitchInfoNX/` on your Switch SD card
@@ -64,7 +64,7 @@ SwitchInfoNX is a feature-rich homebrew application that turns your Nintendo Swi
 
 ---
 
-## 🛠 Building from source
+##  Building from source
 
 ### Prerequisites
 
@@ -87,7 +87,7 @@ The output `SwitchInfoNX.nro` will be placed in the project root directory.
 
 ---
 
-## 🎮 Usage
+##  Usage
 
 | Button | Action |
 |--------|--------|
@@ -101,7 +101,7 @@ The output `SwitchInfoNX.nro` will be placed in the project root directory.
 
 ---
 
-## ⚙️ Configuration
+##  Configuration
 
 Settings are saved to `sdmc:/switch/SwitchInfoNX/config.txt`:
 
@@ -117,7 +117,7 @@ Diagnostic reports are automatically exported to:
 
 ---
 
-## 🧰 Tech Stack
+##  Tech Stack
 
 | Component | Library |
 |-----------|---------|
@@ -129,7 +129,7 @@ Diagnostic reports are automatically exported to:
 
 ---
 
-## 📄 Changelog v0.4
+##  Changelog v0.4
 
 * **Fix**: Unified binary/decimal byte calculation (`format_bytes`) across File Browser, FTP, and MTP.
 * **Fix**: Synchronized global `APP_VERSION` definition throughout UI, FTP daemon, and export banners.
@@ -151,7 +151,7 @@ Diagnostic reports are automatically exported to:
 ---
 
 <div align="center">
-  <sub>Built with ❤️ by dodosi</sub>
+  <sub>Built with  by dodosi</sub>
   <br>
   <sub>Nintendo Switch is a trademark of Nintendo Co., Ltd. This is an unofficial homebrew project.</sub>
 </div>
