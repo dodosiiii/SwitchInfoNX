@@ -22,14 +22,14 @@ SwitchInfoNX is a feature-rich homebrew application that turns your Nintendo Swi
 
 ## ✨ Features (v0.5)
 
-### 🖥️ System Information & Deep Hardware
+###  System Information & Deep Hardware
 * **Firmware & Hardware**: Firmware version, serial number, hardware type (Erista V1 / Mariko V2 / Switch Lite / Switch OLED), region, system language, device nickname.
 * **Environment Detection**: Real-time detection of **EmuMMC (Active)** vs **SysNAND**.
 * **Battery Health Diagnostics**: Live battery percentage, charging state, **Battery Health %** estimation, raw voltage in **mV**, and real-time charge/discharge current (**mA**).
 * **Thermal Monitoring**: Skin & SoC internal temperature readings, dynamic color coding (Normal / Warm / Hot), thermal threshold alerts.
 * **Battery Condition**: Battery health estimate displayed with a clear condition gauge alongside charge and discharge readings.
 
-### 💽 Storage & File Browser
+###  Storage & File Browser
 * **Storage Insights**: SD card usage, NAND partitions (USER / SYSTEM / SAFE), SD read speed test benchmark.
 * **Integrated File Browser**: Full SD card file manager with unified byte calculations (B/KB/MB/GB), folder navigation, name/size sorting, copy/cut/paste, rename, and file deletion.
 * **SD Space Analyzer**: Start a manual scan to see progress and a size breakdown for Nintendo, homebrew, CFW/configuration, media, and other files. Results stay cached in memory until the next scan; tap a category to sort its largest root entries and open them in the file browser. Nintendo content is reported as an aggregate, not as reliable per-game sizes.
@@ -42,16 +42,16 @@ SwitchInfoNX is a feature-rich homebrew application that turns your Nintendo Swi
 * **Live Network Traffic**: One-second receive/send rates, session totals, and a 60-second history graph from active system interfaces; these counters cover system traffic, not only SwitchInfoNX.
 * **Native Ultrahand Status Overlay**: A separate Ultrahand-native `.ovl` with live SoC/PCB temperatures, battery percentage, network RX/TX rates, per-session totals, a 60-second graph, connection type, signal strength, IP address, session reset, and CSV export to SD.
 
-### ⚡ Performance & Hardware Gauges
+###  Performance & Hardware Gauges
 * **Live Clock Speeds**: Real-time CPU, GPU, and EMC memory clock frequencies.
 * **Performance Graphs**: 60-second live FPS and temperature charts with rolling minimum, average, and maximum summaries, RAM usage gauge, and CPU/GPU load score.
 * **Clock Scaling Controls**: Manual CPU/GPU clock target adjustment sliders.
 
-### 🎮 Controller Diagnostics & Stick Drift Detector
+###  Controller Diagnostics & Stick Drift Detector
 * **Interactive Controller Test**: Live button state mapping, analog trigger visualization, gyroscope & accelerometer 6-axis readout.
 * **Stick Drift & Deadzone Visualizer**: Circular analog stick bounds, a center reference, drift deviation percentage, and guidance to release the sticks during a drift check.
 
-### 📁 Transfer Protocols
+###  Transfer Protocols
 * **MTP USB Transfer**: Built-in Media Transfer Protocol server over USB for high-speed drag-and-drop file transfers with PC.
 * **Wi-Fi FTP Server**: Dual-mode FTP / FTPD server with compatible command handling, reliable uploads and folder creation, tuned transfer buffers, and live progress / speed feedback on the Switch.
 * **Transfer Estimates**: Active transfers with a known size show an estimated time remaining based on observed progress.
@@ -68,7 +68,7 @@ SwitchInfoNX is a feature-rich homebrew application that turns your Nintendo Swi
 
 ---
 
-## 📦 Installation
+##  Installation
 
 1. Download the latest `SwitchInfoNX.nro` from [Releases](https://github.com/dodosiiii/SwitchInfoNX/releases)
 2. Copy it to `sdmc:/switch/SwitchInfoNX/` on your Switch SD card
@@ -93,7 +93,7 @@ To disable it, remove `boot2.flag` and reboot. To uninstall it, remove the `4200
 
 ---
 
-## 🛠 Building from source
+##  Building from source
 
 ### Prerequisites
 
@@ -119,7 +119,7 @@ The optional Atmosphere network-counter sysmodule is not included in the default
 
 ---
 
-## 🎮 Usage
+##  Usage
 
 | Button | Action |
 |--------|--------|
@@ -135,7 +135,7 @@ The optional Atmosphere network-counter sysmodule is not included in the default
 
 ---
 
-## ⚙️ Configuration
+##  Configuration
 
 Settings are saved to `sdmc:/switch/SwitchInfoNX/config.txt`:
 
@@ -153,7 +153,7 @@ Diagnostic reports are automatically exported to:
 
 ---
 
-## 🧰 Tech Stack
+##  Tech Stack
 
 | Component | Library |
 |-----------|---------|
@@ -216,7 +216,7 @@ Diagnostic reports are automatically exported to:
 ---
 
 <div align="center">
-  <sub>Built with ❤️ by dodosi</sub>
+  <sub>Built with  by dodosi</sub>
   <br>
   <sub>Nintendo Switch is a trademark of Nintendo Co., Ltd. This is an unofficial homebrew project.</sub>
 </div>
