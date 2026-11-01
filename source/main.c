@@ -28,11 +28,12 @@
 #include "mtp/mtp_wrapper.h"
 #include "save_manager.h"
 #include "game_icons.h"
+#include "network_counters.h"
 
 #define W 1280
 #define H 720
 #define PGS 9
-#define APP_VERSION "0.4"
+#define APP_VERSION "0.5"
 #define APP_NAME "SwitchInfoNX"
 
 // ─── Color definitions ────────────────────────────────────
@@ -190,6 +191,7 @@ static int notif_count = 0;
 static int fps_hist[FPS_HIST_SIZE] = {0};
 static int fps_hist_pos = 0;
 static int fps_hist_count = 0;
+static u64 perf_hist_last_tick = 0;
 
 // CPU/Temp/Memory history
 #define PERF_HIST_SIZE 60
@@ -202,6 +204,33 @@ static int temp_hist_count = 0;
 static int mem_hist[PERF_HIST_SIZE] = {0};
 static int mem_hist_pos = 0;
 static int mem_hist_count = 0;
+
+static bool history_stats(const int *values, int count, int pos, int capacity,
+    int *minimum, int *average, int *maximum) {
+    if (!values || count <= 0 || count > capacity || capacity <= 0) return false;
+    int first = (pos - count + capacity) % capacity;
+    int min_value = values[first], max_value = values[first];
+    long long total = 0;
+    for (int i = 0; i < count; i++) {
+        int value = values[(first + i) % capacity];
+        if (value < min_value) min_value = value;
+        if (value > max_value) max_value = value;
+        total += value;
+    }
+    if (minimum) *minimum = min_value;
+    if (average) *average = (int)(total / count);
+    if (maximum) *maximum = max_value;
+    return true;
+}
+
+static void format_duration(u64 seconds, char *out, size_t out_len) {
+    u64 hours = seconds / 3600;
+    u64 minutes = (seconds % 3600) / 60;
+    u64 remainder = seconds % 60;
+    snprintf(out, out_len, "%02llu:%02llu:%02llu",
+        (unsigned long long)hours, (unsigned long long)minutes,
+        (unsigned long long)remainder);
+}
 
 // Alert thresholds (can be exposed to settings later)
 static s32 temp_alert_millic = 70000; // 70.0 C
@@ -500,6 +529,202 @@ static const char *s_skin_temp[LANG_MAX] = {
     "Температура корпуса",
     "皮肤温度",
     "표면 온도"};
+static const char *s_skin_history[LANG_MAX] = {
+    "Skin Temperature History (60s)", "Historique temperature boitier (60 s)",
+    "Cronologia temperatura scocca (60 s)", "Historial temperatura carcasa (60 s)",
+    "Gehaeusetemperatur-Verlauf (60 s)", "Historico temperatura do corpo (60 s)",
+    "Behuizingstemperatuur (60 s)", "表面温度の履歴 (60秒)", "История температуры корпуса (60 с)",
+    "机身温度历史 (60 秒)", "표면 온도 기록 (60초)"};
+static const char *s_history_stats_fmt[LANG_MAX] = {
+    "FPS 60s  min %d  avg %d  max %d", "FPS 60 s  min %d  moy %d  max %d",
+    "FPS 60 s  min %d  media %d  max %d", "FPS 60 s  min %d  media %d  max %d",
+    "FPS 60 s  min %d  Mittel %d  max %d", "FPS 60 s  min %d  media %d  max %d",
+    "FPS 60 s  min %d  gem. %d  max %d", "FPS 60秒  最小 %d  平均 %d  最大 %d",
+    "FPS 60 с  мин %d  сред. %d  макс %d", "FPS 60秒  最低 %d  平均 %d  最高 %d",
+    "FPS 60초  최소 %d  평균 %d  최대 %d"};
+static const char *s_battery_condition[LANG_MAX] = {
+    "Estimated battery health", "Sante batterie estimee", "Salute batteria stimata", "Salud estimada de bateria",
+    "Geschatzter Akkuzustand", "Saude estimada da bateria", "Geschatte batterijconditie",
+    "推定バッテリー状態", "Оценка состояния батареи", "电池健康估算", "배터리 건강 추정치"};
+static const char *s_transfer_eta[LANG_MAX] = {
+    "ETA %s", "Temps restant %s", "Tempo rimasto %s", "Tiempo restante %s",
+    "Restzeit %s", "Tempo restante %s", "Resterend %s",
+    "残り %s", "Осталось %s", "剩余 %s", "남은 시간 %s"};
+static const char *s_stick_test_hint[LANG_MAX] = {
+    "Release both sticks to check for drift", "Relachez les sticks pour verifier la derive",
+    "Rilascia gli stick per verificare la deriva", "Suelta los sticks para comprobar la deriva",
+    "Sticks loslassen, um Drift zu pruefen", "Solte os sticks para verificar a deriva",
+    "Laat de sticks los om drift te testen", "スティックを離してドリフトを確認",
+    "Отпустите стики для проверки дрейфа", "松开摇杆以检测漂移", "스틱을 놓고 드리프트를 확인하세요"};
+static const char *s_theme_preview[LANG_MAX] = {
+    "Live theme preview", "Apercu du theme", "Anteprima tema", "Vista previa del tema",
+    "Designvorschau", "Pre-visualizacao do tema", "Themapreview",
+    "テーマプレビュー", "Предпросмотр темы", "主题预览", "테마 미리보기"};
+static const char *s_cte_quick[LANG_MAX][3] = {
+    {"Ocean", "Sunset", "Forest"}, {"Ocean", "Coucher de soleil", "Foret"},
+    {"Oceano", "Tramonto", "Foresta"}, {"Oceano", "Atardecer", "Bosque"},
+    {"Ozean", "Sonnenuntergang", "Wald"}, {"Oceano", "Por do sol", "Floresta"},
+    {"Oceaan", "Zonsondergang", "Bos"}, {"海", "夕焼け", "森"},
+    {"Океан", "Закат", "Лес"}, {"海洋", "日落", "森林"}, {"바다", "노을", "숲"}};
+static const char *s_tutorial_title[LANG_MAX] = {
+    "Welcome to SwitchInfoNX", "Bienvenue dans SwitchInfoNX", "Benvenuto in SwitchInfoNX",
+    "Bienvenido a SwitchInfoNX", "Willkommen bei SwitchInfoNX", "Bem-vindo ao SwitchInfoNX",
+    "Welkom bij SwitchInfoNX", "SwitchInfoNXへようこそ", "Добро пожаловать в SwitchInfoNX",
+    "欢迎使用 SwitchInfoNX", "SwitchInfoNX에 오신 것을 환영합니다"};
+static const char *s_tutorial_steps[LANG_MAX][5] = {
+    {"Your dashboard shows console health. Use tabs or L/R to explore. Move the blue cursor with either stick and press A to select.",
+     "Scroll with the right stick vertically or the D-pad. Drag the screen to move through lists and details.",
+     "Storage shows SD usage. Open the browser to inspect files; tap a folder to enter it.",
+     "Performance tracks FPS and temperature. Network and Transfer show connection diagnostics and transfer tools.",
+     "Tools includes dated game-save backups. Select a save, make a backup, then choose a backup before restoring. Controller tests show stick and button input."},
+    {"Le tableau de bord resume l'etat de la console. Onglets ou L/R pour naviguer; bougez le curseur bleu avec un stick et appuyez sur A pour valider.",
+     "Faites defiler avec le stick droit verticalement ou la croix directionnelle. Glissez l'ecran pour parcourir les listes.",
+     "Stockage affiche l'espace SD. Ouvrez l'explorateur et touchez un dossier pour voir son contenu.",
+     "Performances suit les FPS et la temperature. Reseau et Transfert regroupent diagnostics et outils de transfert.",
+     "Outils contient les sauvegardes datees. Choisissez une sauvegarde, creez une copie, puis selectionnez-la avant restauration. La page Manette teste boutons et sticks."},
+    {"La dashboard riassume lo stato della console. Usa schede o L/R; muovi il cursore blu con uno stick e premi A per selezionare.",
+     "Scorri verticalmente con lo stick destro o la croce direzionale. Trascina lo schermo per vedere gli elenchi.",
+     "Archiviazione mostra lo spazio SD. Apri il browser e tocca una cartella per esplorarla.",
+     "Prestazioni registra FPS e temperatura. Rete e Trasferimento offrono diagnostica e strumenti di trasferimento.",
+     "Strumenti contiene backup datati dei salvataggi. Seleziona un salvataggio, crea una copia e sceglila prima del ripristino. Controller prova pulsanti e stick."},
+    {"El panel resume el estado de la consola. Usa pestanas o L/R; mueve el cursor azul con un stick y pulsa A para elegir.",
+     "Desplazate verticalmente con el stick derecho o la cruceta. Arrastra para recorrer las listas.",
+     "Almacenamiento muestra el espacio SD. Abre el explorador y toca una carpeta para entrar.",
+     "Rendimiento registra FPS y temperatura. Red y Transferencia ofrecen diagnosticos y herramientas.",
+     "Herramientas incluye copias fechadas de partidas. Elige una partida, crea una copia y seleccionala antes de restaurar. Mando prueba botones y sticks."},
+    {"Das Dashboard zeigt den Zustand der Konsole. Tabs oder L/R wechseln Bereiche; bewege den blauen Cursor mit einem Stick und druecke A.",
+     "Scrolle vertikal mit dem rechten Stick oder Steuerkreuz. Ziehe fuer Listen und Details.",
+     "Speicher zeigt den SD-Platz. Oeffne den Dateibrowser und tippe einen Ordner an.",
+     "Leistung zeichnet FPS und Temperatur auf. Netzwerk und Transfer bieten Diagnose und Uebertragung.",
+     "Tools enthaelt datierte Spielstand-Sicherungen. Spielstand waehlen, sichern und vor dem Wiederherstellen eine Sicherung auswaehlen. Controller testet Tasten und Sticks."},
+    {"O painel resume o estado da consola. Use abas ou L/R; mova o cursor azul com um stick e pressione A para selecionar.",
+     "Role verticalmente com o stick direito ou a cruz direcional. Arraste para percorrer as listas.",
+     "Armazenamento mostra o espaco SD. Abra o navegador e toque numa pasta.",
+     "Desempenho regista FPS e temperatura. Rede e Transferencia oferecem diagnosticos e ferramentas.",
+     "Ferramentas guarda copias datadas dos jogos. Escolha um jogo, crie uma copia e selecione-a antes de restaurar. Controlador testa botoes e analógicos."},
+    {"Het dashboard toont de consolestatus. Wissel met tabbladen of L/R; beweeg de blauwe cursor met een stick en druk op A.",
+     "Scroll verticaal met de rechterstick of richtingsknoppen. Sleep om lijsten te bekijken.",
+     "Opslag toont SD-ruimte. Open de bestandsbrowser en tik op een map om die te openen.",
+     "Prestaties registreert FPS en temperatuur. Netwerk en Overdracht bieden diagnose en overdracht.",
+     "Tools bevat gedateerde gameback-ups. Kies een save, maak een back-up en selecteer die voor herstel. Controller test knoppen en sticks."},
+    {"ダッシュボードで本体の状態を確認できます。タブやL/Rで移動し、スティックで青いカーソルを動かしてAで選択します。",
+     "右スティック上下または十字ボタンでスクロールします。画面をドラッグして一覧を移動できます。",
+     "ストレージでSD容量を確認します。ファイルブラウザーを開き、フォルダーをタップします。",
+     "パフォーマンスはFPSと温度を記録します。ネットワークと転送には診断と転送機能があります。",
+     "ツールでゲームの日時付きセーブを作成します。セーブを選び、バックアップ後、復元前に対象を選択します。コントローラーではボタンとスティックをテストできます。"},
+    {"Панель показывает состояние консоли. Используйте вкладки или L/R; двигайте синий курсор стиком и нажмите A для выбора.",
+     "Прокручивайте правым стиком вверх/вниз или крестовиной. Перетаскивайте экран для просмотра списков.",
+     "Хранилище показывает место на SD. Откройте файловый браузер и коснитесь папки.",
+     "Производительность записывает FPS и температуру. Сеть и Передача содержат диагностику и инструменты.",
+     "В Инструментах доступны датированные копии сохранений. Выберите сохранение, создайте копию и выберите ее перед восстановлением. Контроллер проверяет кнопки и стики."},
+    {"仪表板概览主机状态。用标签页或 L/R 切换；用摇杆移动蓝色光标并按 A 选择。",
+     "用右摇杆上下或方向键滚动页面，也可拖动屏幕浏览列表。",
+     "存储页面显示 SD 卡空间。打开文件浏览器并点按文件夹查看内容。",
+     "性能页面记录 FPS 和温度。网络与传输页面提供诊断和传输工具。",
+     "工具页面可创建带日期的游戏存档备份。选择存档并备份，恢复前先选择备份。控制器页面可测试按键和摇杆。"},
+    {"대시보드에서 본체 상태를 확인하세요. 탭 또는 L/R로 이동하고 스틱으로 파란 커서를 움직여 A로 선택합니다.",
+     "오른쪽 스틱 위아래 또는 방향 버튼으로 스크롤하세요. 화면을 끌어 목록을 살펴보세요.",
+     "저장 공간에서 SD 용량을 확인하세요. 파일 브라우저를 열고 폴더를 눌러 이동합니다.",
+     "성능은 FPS와 온도를 기록합니다. 네트워크와 전송에서 진단 및 전송 도구를 사용할 수 있습니다.",
+     "도구에서 날짜별 게임 저장 데이터를 백업할 수 있습니다. 저장 데이터를 선택해 백업하고 복원 전에 백업본을 선택하세요. 컨트롤러에서 버튼과 스틱을 테스트합니다."}
+};
+static const char *s_tutorial_previous[LANG_MAX] = {
+    "Back", "Retour", "Indietro", "Atras", "Zuruck", "Voltar", "Terug",
+    "戻る", "Назад", "上一步", "이전"};
+static const char *s_tutorial_next[LANG_MAX] = {
+    "Next", "Suivant", "Avanti", "Siguiente", "Weiter", "Proximo", "Volgende",
+    "次へ", "Далее", "下一步", "다음"};
+static const char *s_tutorial_finish[LANG_MAX] = {
+    "Start exploring", "Commencer", "Inizia", "Empezar", "Loslegen", "Comecar", "Aan de slag",
+    "使ってみる", "Начать", "开始使用", "시작하기"};
+static const char *s_tutorial_skip[LANG_MAX] = {
+    "Skip", "Passer", "Salta", "Omitir", "Ueberspringen", "Pular", "Overslaan",
+    "スキップ", "Пропустить", "跳过", "건너뛰기"};
+static const char *s_tutorial_settings[LANG_MAX] = {
+    "View the tutorial again", "Revoir le tutoriel", "Rivedi il tutorial", "Ver el tutorial de nuevo",
+    "Tutorial erneut ansehen", "Ver o tutorial novamente", "Tutorial opnieuw bekijken",
+    "チュートリアルをもう一度見る", "Посмотреть обучение снова", "重新查看教程", "튜토리얼 다시 보기"};
+static const char *s_tutorial_write_error[LANG_MAX] = {
+    "Could not save tutorial status. Check the SD card, then try again.",
+    "Impossible d'enregistrer le tutoriel. Verifiez la carte SD puis reessayez.",
+    "Impossibile salvare lo stato del tutorial. Controlla la scheda SD.",
+    "No se pudo guardar el tutorial. Comprueba la tarjeta SD e intentalo de nuevo.",
+    "Tutorialstatus konnte nicht gespeichert werden. SD-Karte pruefen.",
+    "Nao foi possivel guardar o tutorial. Verifique o cartao SD.",
+    "Tutorialstatus opslaan mislukt. Controleer de SD-kaart.",
+    "チュートリアルの状態を保存できません。SDカードを確認してください。",
+    "Не удалось сохранить статус обучения. Проверьте SD-карту.",
+    "无法保存教程状态。请检查 SD 卡后重试。",
+    "튜토리얼 상태를 저장할 수 없습니다. SD 카드를 확인하세요."};
+static const char *s_tesla_guide_title[LANG_MAX] = {
+    "Ultrahand overlay setup guide", "Guide d'installation d'un overlay Ultrahand",
+    "Guida all'installazione di un overlay Ultrahand", "Guia de instalacion de un overlay Ultrahand",
+    "Anleitung zur Ultrahand-Overlay-Installation", "Guia de instalacao de um overlay Ultrahand",
+    "Installatiegids voor Ultrahand-overlays", "Ultrahandオーバーレイの導入ガイド",
+    "Установка оверлея Ultrahand", "Ultrahand 覆盖层安装指南", "Ultrahand 오버레이 설치 안내"};
+static const char *s_tesla_guide_steps[LANG_MAX][5] = {
+    {"Install Ultrahand first by following the instructions on its GitHub page.",
+     "Visit SwitchInfoNX Releases. If no .ovl asset is listed, build the source with make to create overlay/SwitchInfoNX.ovl.",
+     "When a compatible .ovl is published, download it. Connect the Switch by USB and enable MTP, or start an FTP server.",
+     "Copy the .ovl file to sdmc:/switch/.overlays/ using your MTP or FTP client. Do not copy an archive as if it were the overlay.",
+     "Safely disconnect, then open Ultrahand and select the SwitchInfoNX network overlay. If it does not appear, verify the installation and file path."},
+    {"Installez d'abord Ultrahand en suivant les instructions de son depot GitHub.",
+     "Ouvrez les Releases de SwitchInfoNX. Si aucun .ovl n'est publie, compilez le depot avec make pour creer overlay/SwitchInfoNX.ovl.",
+     "Quand un fichier .ovl compatible sera publie, telechargez-le. Connectez la Switch en USB avec MTP, ou lancez un serveur FTP.",
+     "Avec MTP ou FTP, copiez le fichier .ovl dans sdmc:/switch/.overlays/. Ne copiez pas une archive a la place de l'overlay.",
+     "Deconnectez proprement, ouvrez Ultrahand et selectionnez l'overlay reseau SwitchInfoNX. S'il n'apparait pas, verifiez l'installation et le chemin."},
+    {"Installa prima Ultrahand seguendo le istruzioni nella sua pagina GitHub.",
+     "Apri Releases di SwitchInfoNX. Se non trovi un .ovl, compila il repository con make per creare overlay/SwitchInfoNX.ovl.",
+     "Quando sara pubblicato un file .ovl compatibile, scaricalo. Collega la Switch via USB e attiva MTP, oppure avvia un server FTP.",
+     "Con un client MTP o FTP copia il file .ovl in sdmc:/switch/.overlays/. Non copiare un archivio al posto dell'overlay.",
+     "Disconnetti in sicurezza, apri Ultrahand e seleziona l'overlay di rete SwitchInfoNX. Se non appare, controlla installazione e percorso."},
+    {"Instala primero Ultrahand siguiendo las instrucciones de su pagina de GitHub.",
+     "Abre Releases de SwitchInfoNX. Si no hay un .ovl publicado, compila el repositorio con make para crear overlay/SwitchInfoNX.ovl.",
+     "Cuando se publique un .ovl compatible, descargalo. Conecta la Switch por USB y activa MTP, o inicia un servidor FTP.",
+     "Con un cliente MTP o FTP, copia el .ovl en sdmc:/switch/.overlays/. No uses un archivo comprimido como overlay.",
+     "Desconecta de forma segura, abre Ultrahand y selecciona el overlay de red de SwitchInfoNX. Si no aparece, revisa la instalacion y la ruta."},
+    {"Installiere zuerst Ultrahand gemaess den Anweisungen auf der GitHub-Seite.",
+     "Oeffne SwitchInfoNX-Releases. Falls kein .ovl bereitsteht, erstelle es mit make aus dem Quellcode: overlay/SwitchInfoNX.ovl.",
+     "Lade eine kompatible .ovl-Datei herunter, sobald sie veroeffentlicht ist. Verbinde USB mit MTP oder starte einen FTP-Server.",
+     "Kopiere die .ovl-Datei per MTP oder FTP nach sdmc:/switch/.overlays/. Ein Archiv ist kein installierter Overlay.",
+     "Trenne sicher, oeffne Ultrahand und waehle das SwitchInfoNX-Netzwerk-Overlay. Pruefe bei Fehlern Installation und Pfad."},
+    {"Instale primeiro o Ultrahand seguindo as instrucoes na respetiva pagina do GitHub.",
+     "Abre Releases do SwitchInfoNX. Se nao houver .ovl publicado, compila o codigo com make para criar overlay/SwitchInfoNX.ovl.",
+     "Quando houver um .ovl compativel, transfere-o. Liga a Switch por USB com MTP ou inicia um servidor FTP.",
+     "Com MTP ou FTP, copia o .ovl para sdmc:/switch/.overlays/. Nao copies um arquivo comprimido como overlay.",
+     "Desliga em seguranca, abre o Ultrahand e seleciona o overlay de rede do SwitchInfoNX. Se nao aparecer, verifica a instalacao e o caminho."},
+    {"Installeer eerst Ultrahand volgens de instructies op de GitHub-pagina.",
+     "Open SwitchInfoNX-Releases. Als er geen .ovl staat, bouw de broncode met make om overlay/SwitchInfoNX.ovl te maken.",
+     "Download een compatibel .ovl-bestand zodra het beschikbaar is. Verbind via USB met MTP of start een FTP-server.",
+     "Kopieer het .ovl-bestand met MTP of FTP naar sdmc:/switch/.overlays/. Een archiefbestand is niet de overlay zelf.",
+     "Koppel veilig los, open Ultrahand en selecteer de SwitchInfoNX-netwerkoverlay. Controleer bij problemen de installatie en het pad."},
+    {"まずGitHubの手順に従ってUltrahandをインストールしてください。",
+     "SwitchInfoNXのReleasesを開きます。.ovlがない場合はソースをmakeでビルドするとoverlay/SwitchInfoNX.ovlが作成されます。",
+     "互換性のある.ovlが公開されたらダウンロードします。USBで接続してMTPを有効にするか、FTPサーバーを起動します。",
+     "MTPまたはFTPで.ovlファイルをsdmc:/switch/.overlays/へコピーします。圧縮ファイルのまま配置しないでください。",
+     "安全に取り外し、Ultrahandを開いてSwitchInfoNXネットワークオーバーレイを選択します。表示されない場合は導入方法とパスを確認してください。"},
+    {"Сначала установите Ultrahand по инструкции на его странице GitHub.",
+     "Откройте Releases SwitchInfoNX. Если .ovl не опубликован, соберите исходники командой make: overlay/SwitchInfoNX.ovl.",
+     "Когда появится совместимый .ovl, скачайте его. Подключите Switch по USB с MTP или запустите FTP-сервер.",
+     "Через MTP или FTP скопируйте .ovl в sdmc:/switch/.overlays/. Не оставляйте overlay внутри архива.",
+     "Безопасно отключите устройство, откройте Ultrahand и выберите сетевой оверлей SwitchInfoNX. Если его нет, проверьте установку и путь."},
+    {"请先按照 GitHub 页面上的说明安装 Ultrahand。",
+     "打开 SwitchInfoNX Releases。若没有 .ovl，请在源码目录运行 make，生成 overlay/SwitchInfoNX.ovl。",
+     "发布兼容的 .ovl 后再下载。通过 USB 启用 MTP，或在主机上启动 FTP 服务器。",
+     "使用 MTP 或 FTP 将 .ovl 文件复制到 sdmc:/switch/.overlays/。不要把压缩包当作 overlay。",
+     "安全断开后，打开 Ultrahand 并选择 SwitchInfoNX 网络覆盖层。若未显示，请检查安装和文件路径。"},
+    {"먼저 GitHub 페이지의 안내에 따라 Ultrahand를 설치하세요.",
+     "SwitchInfoNX Releases를 여세요. .ovl이 없으면 소스에서 make를 실행해 overlay/SwitchInfoNX.ovl을 생성하세요.",
+     "호환되는 .ovl이 공개되면 다운로드하세요. USB MTP를 활성화하거나 FTP 서버를 실행하세요.",
+     "MTP 또는 FTP로 .ovl 파일을 sdmc:/switch/.overlays/에 복사하세요. 압축 파일을 그대로 넣지 마세요.",
+     "안전하게 연결을 해제하고 Ultrahand를 열어 SwitchInfoNX 네트워크 오버레이를 선택하세요. 표시되지 않으면 설치와 경로를 확인하세요."}
+};
+static const char *s_tesla_guide_button[LANG_MAX] = {
+    "Ultrahand setup guide", "Guide Ultrahand", "Guida Ultrahand", "Guia Ultrahand", "Ultrahand-Anleitung",
+    "Guia Ultrahand", "Ultrahand-handleiding", "Ultrahand導入ガイド", "Гид Ultrahand", "Ultrahand 安装指南", "Ultrahand 안내"};
+static const char *s_tesla_guide_close[LANG_MAX] = {
+    "Close", "Fermer", "Chiudi", "Cerrar", "Schliessen", "Fechar", "Sluiten",
+    "閉じる", "Закрыть", "关闭", "닫기"};
 static const char *s_soc_temp[LANG_MAX] = {
     "SoC Temp", "Temp. SoC", "Temp. SoC", "Temp. SoC",
     "SoC-Temp.", "Temp. SoC", "SoC-temp.",
@@ -729,6 +954,86 @@ static const char *s_sd_breakdown[LANG_MAX] = {
     "SD Card Content Breakdown",
     "SD Card Content Breakdown",
     "SD Card Content Breakdown"};
+static const char *s_sd_scan_button[LANG_MAX] = {
+    "ANALYZE SD", "ANALYSER LA SD", "ANALIZZA SD", "ANALIZAR SD",
+    "SD ANALYSIEREN", "ANALISAR SD", "SD ANALYSEREN",
+    "SDを分析", "АНАЛИЗ SD", "分析 SD 卡", "SD 분석"};
+static const char *s_sd_scan_prompt[LANG_MAX] = {
+    "Tap Analyze SD to calculate folder sizes. Results stay cached until the next scan.",
+    "Touchez Analyser pour calculer les tailles. Resultats gardes en cache jusqu'au prochain scan.",
+    "Tocca Analizza per calcolare le dimensioni. Risultati in cache fino alla prossima scansione.",
+    "Toca Analizar para calcular tamanos. Resultados guardados hasta el siguiente analisis.",
+    "Tippe Analysieren fuer Ordnergroessen. Ergebnisse bleiben bis zum naechsten Scan gespeichert.",
+    "Toque Analisar para calcular tamanhos. Resultados em cache ate a proxima analise.",
+    "Tik op Analyseren voor mapgroottes. Resultaten blijven bewaard tot de volgende scan.",
+    "分析をタップしてフォルダー容量を計算します。次のスキャンまで結果を保存します。",
+    "Нажмите «Анализ», чтобы вычислить размеры. Результаты сохраняются до нового сканирования.",
+    "点击“分析”计算文件夹大小。结果会保留到下次扫描。",
+    "분석을 눌러 폴더 크기를 계산합니다. 결과는 다음 검사까지 저장됩니다."};
+static const char *s_sd_scan_running[LANG_MAX] = {
+    "Scanning SD card... %llu files, %llu folders",
+    "Analyse SD... %llu fichiers, %llu dossiers",
+    "Scansione SD... %llu file, %llu cartelle",
+    "Analizando SD... %llu archivos, %llu carpetas",
+    "SD-Scan... %llu Dateien, %llu Ordner",
+    "A analisar SD... %llu ficheiros, %llu pastas",
+    "SD scannen... %llu bestanden, %llu mappen",
+    "SDをスキャン中... ファイル %llu 件、フォルダー %llu 件",
+    "Сканирование SD... файлов: %llu, папок: %llu",
+    "正在扫描 SD 卡... 文件 %llu 个，文件夹 %llu 个",
+    "SD 검사 중... 파일 %llu개, 폴더 %llu개"};
+static const char *s_sd_scan_done[LANG_MAX] = {
+    "Scan complete: %llu files, %llu folders%s",
+    "Analyse terminee : %llu fichiers, %llu dossiers%s",
+    "Scansione completata: %llu file, %llu cartelle%s",
+    "Analisis completa: %llu archivos, %llu carpetas%s",
+    "Scan abgeschlossen: %llu Dateien, %llu Ordner%s",
+    "Analise concluida: %llu ficheiros, %llu pastas%s",
+    "Scan voltooid: %llu bestanden, %llu mappen%s",
+    "スキャン完了：ファイル %llu 件、フォルダー %llu 件%s",
+    "Сканирование завершено: файлов %llu, папок %llu%s",
+    "扫描完成：文件 %llu 个，文件夹 %llu 个%s",
+    "검사 완료: 파일 %llu개, 폴더 %llu개%s"};
+static const char *s_sd_scan_failed[LANG_MAX] = {
+    "SD scan failed. Check the card and try again.",
+    "Echec du scan SD. Verifiez la carte et reessayez.",
+    "Scansione SD non riuscita. Controlla la scheda.",
+    "Fallo al analizar SD. Comprueba la tarjeta.",
+    "SD-Scan fehlgeschlagen. Karte pruefen und erneut versuchen.",
+    "Falha na analise SD. Verifique o cartao.",
+    "SD-scan mislukt. Controleer de kaart.",
+    "SDスキャン失敗。カードを確認して再試行してください。",
+    "Ошибка сканирования SD. Проверьте карту.",
+    "SD 卡扫描失败。请检查存储卡后重试。",
+    "SD 검사 실패. 카드를 확인하고 다시 시도하세요."};
+static const char *s_sd_scan_categories[LANG_MAX][5] = {
+    {"Games / Nintendo", "Homebrew / apps", "CFW / config", "Media", "Other"},
+    {"Jeux / Nintendo", "Homebrews / applis", "CFW / configuration", "Medias", "Autres"},
+    {"Giochi / Nintendo", "Homebrew / app", "CFW / config", "Media", "Altro"},
+    {"Juegos / Nintendo", "Homebrew / apps", "CFW / config", "Multimedia", "Otros"},
+    {"Spiele / Nintendo", "Homebrew / Apps", "CFW / Konfig.", "Medien", "Andere"},
+    {"Jogos / Nintendo", "Homebrew / apps", "CFW / config", "Media", "Outros"},
+    {"Games / Nintendo", "Homebrew / apps", "CFW / config", "Media", "Overig"},
+    {"ゲーム / Nintendo", "自作アプリ", "CFW / 設定", "メディア", "その他"},
+    {"Игры / Nintendo", "Homebrew / приложения", "CFW / настройки", "Медиа", "Другое"},
+    {"游戏 / Nintendo", "自制软件", "CFW / 配置", "媒体", "其他"},
+    {"게임 / Nintendo", "홈브류 / 앱", "CFW / 설정", "미디어", "기타"}};
+static const char *s_sd_scan_details[LANG_MAX] = {
+    "Largest entries (tap a folder to open):",
+    "Plus gros elements (touchez un dossier pour l'ouvrir) :",
+    "Elementi piu grandi (tocca una cartella per aprirla):",
+    "Elementos mayores (toca una carpeta para abrirla):",
+    "Groesste Eintraege (Ordner antippen zum Oeffnen):",
+    "Maiores itens (toque numa pasta para abrir):",
+    "Grootste items (tik op een map om te openen):",
+    "大きい項目（フォルダーをタップして開く）：",
+    "Крупнейшие элементы (нажмите папку, чтобы открыть):",
+    "占用空间最大的项目（点击文件夹打开）：",
+    "큰 항목 (폴더를 눌러 열기):"};
+static const char *s_sd_scan_total[LANG_MAX] = {
+    "Scanned files", "Fichiers analyses", "File analizzati", "Archivos analizados",
+    "Analysierte Dateien", "Ficheiros analisados", "Gescande bestanden",
+    "スキャン済みファイル", "Размер просмотренных файлов", "已扫描文件", "검사한 파일"};
 static const char *s_touch_test[LANG_MAX] = {
     "[Touch] Test Speed", "[Touch] Test Vitesse", "[Touch] Test Velocita", "[Touch] Probar Velocidad",
     "[Touch] Geschw. testen", "[Touch] Testar Velocidade", "[Touch] Snelheid testen",
@@ -750,70 +1055,6 @@ static const char *s_empty_dir[LANG_MAX] = {
     "(empty directory)",
     "(empty directory)",
     "(empty directory)"};
-static const char *s_folders[LANG_MAX] = {
-    "Folders: %d", "Dossiers: %d", "Cartelle: %d", "Carpetas: %d",
-    "Ordner: %d", "Pastas: %d", "Mappen: %d",
-    "Folders: %d",
-    "Folders: %d",
-    "Folders: %d",
-    "Folders: %d"};
-static const char *s_nro_count[LANG_MAX] = {
-    "NRO: %d", "NRO: %d", "NRO: %d", "NRO: %d",
-    "NRO: %d", "NRO: %d", "NRO: %d",
-    "NRO: %d",
-    "NRO: %d",
-    "NRO: %d",
-    "NRO: %d"};
-static const char *s_images[LANG_MAX] = {
-    "Images: %d", "Images: %d", "Immagini: %d", "Imagenes: %d",
-    "Bilder: %d", "Imagens: %d", "Afbeeldingen: %d",
-    "Images: %d",
-    "Images: %d",
-    "Images: %d",
-    "Images: %d"};
-static const char *s_videos[LANG_MAX] = {
-    "Videos: %d", "Videos: %d", "Video: %d", "Videos: %d",
-    "Videos: %d", "Videos: %d", "Videos: %d",
-    "Videos: %d",
-    "Videos: %d",
-    "Videos: %d",
-    "Videos: %d"};
-static const char *s_music[LANG_MAX] = {
-    "Music: %d", "Musique: %d", "Musica: %d", "Musica: %d",
-    "Musik: %d", "Musica: %d", "Muziek: %d",
-    "Music: %d",
-    "Music: %d",
-    "Music: %d",
-    "Music: %d"};
-static const char *s_games[LANG_MAX] = {
-    "Games: %d", "Jeux: %d", "Giochi: %d", "Juegos: %d",
-    "Spiele: %d", "Jogos: %d", "Spelletjes: %d",
-    "Games: %d",
-    "Games: %d",
-    "Games: %d",
-    "Games: %d"};
-static const char *s_docs[LANG_MAX] = {
-    "Docs: %d", "Documents: %d", "Documenti: %d", "Documentos: %d",
-    "Dokumente: %d", "Documentos: %d", "Documenten: %d",
-    "Docs: %d",
-    "Docs: %d",
-    "Docs: %d",
-    "Docs: %d"};
-static const char *s_other[LANG_MAX] = {
-    "Other: %d", "Autres: %d", "Altri: %d", "Otros: %d",
-    "Andere: %d", "Outros: %d", "Anders: %d",
-    "Other: %d",
-    "Other: %d",
-    "Other: %d",
-    "Other: %d"};
-static const char *s_homebrew_count[LANG_MAX] = {
-    "Homebrew Apps: %d", "Apps Homebrew: %d", "App Homebrew: %d", "Apps Homebrew: %d",
-    "Homebrew-Apps: %d", "Apps Homebrew: %d", "Homebrew-apps: %d",
-    "Homebrew Apps: %d",
-    "Homebrew Apps: %d",
-    "Homebrew Apps: %d",
-    "Homebrew Apps: %d"};
-
 // --- Page 2: Network ---
 static const char *s_ip_config[LANG_MAX] = {
     "IP Configuration", "Configuration IP", "Configurazione IP", "Configuracion IP",
@@ -1039,6 +1280,39 @@ static const char *s_signal_history[LANG_MAX] = {
     "История сигнала (60 с):",
     "信号历史（60秒）：",
     "신호 기록 (60초):"};
+static const char *s_traffic_title[LANG_MAX] = {
+    "Live Network Traffic (all active interfaces)", "Trafic reseau en direct (interfaces actives)",
+    "Traffico di rete in tempo reale (interfacce attive)", "Trafico de red en tiempo real (interfaces activas)",
+    "Netzwerkverkehr live (aktive Schnittstellen)", "Trafego de rede em tempo real (interfaces ativas)",
+    "Netwerkverkeer live (actieve interfaces)", "リアルタイム通信量（有効なインターフェース）",
+    "Сетевой трафик (активные интерфейсы)", "实时网络流量（所有活动接口）",
+    "실시간 네트워크 트래픽 (활성 인터페이스)"};
+static const char *s_traffic_rx[LANG_MAX] = {
+    "Received", "Recu", "Ricevuti", "Recibido", "Empfangen", "Recebido", "Ontvangen",
+    "受信", "Получено", "接收", "수신"};
+static const char *s_traffic_tx[LANG_MAX] = {
+    "Sent", "Envoye", "Inviati", "Enviado", "Gesendet", "Enviado", "Verzonden",
+    "送信", "Отправлено", "发送", "송신"};
+static const char *s_traffic_received_total[LANG_MAX] = {
+    "Received this session", "Recu depuis ouverture", "Ricevuti in sessione",
+    "Recibido en esta sesion", "Empfangen in dieser Sitzung", "Recebido nesta sessao",
+    "Ontvangen deze sessie", "今回の受信量", "Получено за сеанс", "本次接收", "이번 세션 수신"};
+static const char *s_traffic_sent_total[LANG_MAX] = {
+    "Sent this session", "Envoye depuis ouverture", "Inviati in sessione",
+    "Enviado en esta sesion", "Gesendet in dieser Sitzung", "Enviado nesta sessao",
+    "Verzonden deze sessie", "今回の送信量", "Отправлено за сеанс", "本次发送", "이번 세션 송신"};
+static const char *s_traffic_unavailable[LANG_MAX] = {
+    "Interface counters are unavailable on this system.",
+    "Compteurs d'interface indisponibles sur ce systeme.",
+    "Contatori di interfaccia non disponibili.",
+    "Contadores de interfaz no disponibles en este sistema.",
+    "Schnittstellenzaehler sind nicht verfuegbar.",
+    "Contadores de interface indisponiveis neste sistema.",
+    "Interfacetellers zijn niet beschikbaar op dit systeem.",
+    "このシステムではインターフェース統計を利用できません。",
+    "Счетчики интерфейсов недоступны.",
+    "此系统无法读取网络接口计数。",
+    "이 시스템에서 인터페이스 카운터를 사용할 수 없습니다."};
 static const char *s_not_connected[LANG_MAX] = {
     "Not connected to any network.", "Non connecte a un reseau.", "Non connesso a nessuna rete.", "No conectado a ninguna red.",
     "Mit keinem Netzwerk verbunden.", "Nao conectado a nenhuma rede.", "Niet verbonden met een netwerk.",
@@ -1339,12 +1613,12 @@ static const char *s_mem_load[LANG_MAX] __attribute__((unused)) = {
     "MEM Load",
     "MEM Load"};
 static const char *s_fps_history[LANG_MAX] = {
-    "FPS History (60 frames):", "Historique FPS (60 images):", "Cronologia FPS (60 frame):", "Historial FPS (60 fotogramas):",
-    "FPS-Verlauf (60 Bilder):", "Historico FPS (60 quadros):", "FPS-geschiedenis (60 frames):",
-    "FPS履歴（60フレーム）：",
-    "История FPS (60 кадров):",
-    "FPS 历史（60帧）：",
-    "FPS 기록 (60프레임):"};
+    "FPS History (60 seconds):", "Historique FPS (60 secondes) :", "Cronologia FPS (60 secondi):", "Historial FPS (60 segundos):",
+    "FPS-Verlauf (60 Sekunden):", "Historico FPS (60 segundos):", "FPS-geschiedenis (60 seconden):",
+    "FPS履歴（60秒）：",
+    "История FPS (60 секунд):",
+    "FPS 历史（60 秒）：",
+    "FPS 기록 (60초):"};
 static const char *s_ram_usage[LANG_MAX] = {
     "RAM Usage", "Utilisation RAM", "Utilizzo RAM", "Uso de RAM",
     "RAM-Nutzung", "Uso de RAM", "RAM-gebruik",
@@ -1517,19 +1791,19 @@ static const char *s_current_br_fmt[LANG_MAX] = {
     "Current: %.0f%%",
     "Current: %.0f%%"};
 static const char *s_auto_on_off[LANG_MAX] = {
-    "Auto: ON  [A] disable", "Auto: ON  [A] desactiver", "Auto: ON  [A] disattiva", "Auto: ON  [A] desactivar",
-    "Auto: AN  [A] ausschalten", "Auto: ON  [A] desativar", "Auto: AAN  [A] uitschakelen",
-    "Auto: ON  [A] disable",
-    "Auto: ON  [A] disable",
-    "Auto: ON  [A] disable",
-    "Auto: ON  [A] disable"};
+    "Auto: ON", "Auto: active", "Auto: attiva", "Auto: activo",
+    "Auto: AN", "Auto: ativo", "Auto: AAN",
+    "Auto: ON",
+    "Auto: ON",
+    "Auto: ON",
+    "Auto: ON"};
 static const char *s_auto_off_on[LANG_MAX] = {
-    "Auto: OFF  [A] enable", "Auto: OFF  [A] activer", "Auto: OFF  [A] attiva", "Auto: OFF  [A] activar",
-    "Auto: AUS  [A] einschalten", "Auto: OFF  [A] ativar", "Auto: UIT  [A] inschakelen",
-    "Auto: OFF  [A] enable",
-    "Auto: OFF  [A] enable",
-    "Auto: OFF  [A] enable",
-    "Auto: OFF  [A] enable"};
+    "Auto: OFF", "Auto: inactive", "Auto: disattiva", "Auto: inactivo",
+    "Auto: AUS", "Auto: inativo", "Auto: UIT",
+    "Auto: OFF",
+    "Auto: OFF",
+    "Auto: OFF",
+    "Auto: OFF"};
 static const char *s_br_adjust[LANG_MAX] = {
     "[DPad] Adjust  |  Touch drag", "[DPad] Ajuster  |  Toucher glisser", "[DPad] Regola  |  Tocca trascina", "[DPad] Ajustar  |  Tocar arrastrar",
     "[DPad] Einstellen  |  Beruehren ziehen", "[DPad] Ajustar  |  Tocar arrastar", "[DPad] Aanpassen  |  Raak en sleep",
@@ -1707,25 +1981,88 @@ static const char *s_app_mode[LANG_MAX] = {
     "App Mode",
     "App Mode"};
 static const char *s_modes[LANG_MAX][3] = {
-    {"Normal App", "Overlay (Tesla)", "Sysmodule"},
-    {"App normale", "Overlay (Tesla)", "Sysmodule"},
-    {"App normale", "Overlay (Tesla)", "Sysmodule"},
-    {"App normal", "Overlay (Tesla)", "Sysmodule"},
-    {"Normale App", "Overlay (Tesla)", "Sysmodule"},
-    {"App normal", "Overlay (Tesla)", "Sysmodule"},
-    {"Normale app", "Overlay (Tesla)", "Sysmodule"},
-    {"Normal App", "Overlay (Tesla)", "Sysmodule"},
-    {"Normal App", "Overlay (Tesla)", "Sysmodule"},
-    {"Normal App", "Overlay (Tesla)", "Sysmodule"},
-    {"Normal App", "Overlay (Tesla)", "Sysmodule"}};
+    {"Normal App", "Overlay", "Sysmodule"},
+    {"App normale", "Overlay", "Sysmodule"},
+    {"App normale", "Overlay", "Sysmodule"},
+    {"App normal", "Overlay", "Sysmodule"},
+    {"Normale App", "Overlay", "Sysmodule"},
+    {"App normal", "Overlay", "Sysmodule"},
+    {"Normale app", "Overlay", "Sysmodule"},
+    {"Normal App", "Overlay", "Sysmodule"},
+    {"Normal App", "Overlay", "Sysmodule"},
+    {"Normal App", "Overlay", "Sysmodule"},
+    {"Normal App", "Overlay", "Sysmodule"}};
 static const char *s_mode_switch[LANG_MAX] = {
     "This build runs as a normal homebrew app.", "Cette version fonctionne comme une app homebrew.", "Questa versione funziona come app homebrew.", "Esta version funciona como app homebrew.",
     "Diese Version laeuft als Homebrew-App.", "Esta versao funciona como app homebrew.", "Deze versie werkt als homebrew-app.",
     "このビルドは通常の自作アプリです。", "Эта сборка работает как обычное приложение.", "此版本以普通自制软件运行。", "이 빌드는 일반 홈브류 앱으로 실행됩니다."};
-static const char *s_overlay_desc[LANG_MAX] = {
-    "Tesla needs a separate libtesla .ovl build in /switch/.overlays.", "Tesla demande un binaire .ovl libtesla dans /switch/.overlays.", "Tesla richiede un .ovl libtesla separato in /switch/.overlays.", "Tesla requiere un .ovl libtesla separado en /switch/.overlays.",
-    "Tesla benoetigt ein eigenes libtesla-.ovl in /switch/.overlays.", "Tesla requer um .ovl libtesla separado em /switch/.overlays.", "Tesla vereist een aparte libtesla-.ovl in /switch/.overlays.",
-    "Teslaには別のlibtesla .ovlを/switch/.overlaysに配置します。", "Для Tesla нужна отдельная сборка libtesla .ovl в /switch/.overlays.", "Tesla 需要单独编译 libtesla .ovl 并放入 /switch/.overlays。", "Tesla는 별도 libtesla .ovl을 /switch/.overlays에 설치해야 합니다."};
+static const char *s_overlay_detected[LANG_MAX] = {
+    "OVL detected: SwitchInfoNX.ovl is installed.",
+    "OVL detecte : SwitchInfoNX.ovl est installe.",
+    "OVL rilevato: SwitchInfoNX.ovl e installato.",
+    "OVL detectado: SwitchInfoNX.ovl esta instalado.",
+    "OVL erkannt: SwitchInfoNX.ovl ist installiert.",
+    "OVL detetado: SwitchInfoNX.ovl esta instalado.",
+    "OVL gevonden: SwitchInfoNX.ovl is geinstalleerd.",
+    "OVLを検出しました：SwitchInfoNX.ovlはインストール済みです。",
+    "OVL обнаружен: SwitchInfoNX.ovl установлен.",
+    "已检测到 OVL：SwitchInfoNX.ovl 已安装。",
+    "OVL 감지됨: SwitchInfoNX.ovl이 설치되어 있습니다."};
+static const char *s_overlay_missing[LANG_MAX] = {
+    "OVL not found. Copy it to /switch/.overlays/SwitchInfoNX.ovl.",
+    "OVL introuvable. Copiez-le dans /switch/.overlays/SwitchInfoNX.ovl.",
+    "OVL non trovato. Copialo in /switch/.overlays/SwitchInfoNX.ovl.",
+    "OVL no encontrado. Copialo en /switch/.overlays/SwitchInfoNX.ovl.",
+    "OVL nicht gefunden. Kopiere es nach /switch/.overlays/SwitchInfoNX.ovl.",
+    "OVL nao encontrado. Copia-o para /switch/.overlays/SwitchInfoNX.ovl.",
+    "OVL niet gevonden. Kopieer het naar /switch/.overlays/SwitchInfoNX.ovl.",
+    "OVLが見つかりません。/switch/.overlays/SwitchInfoNX.ovlにコピーしてください。",
+    "OVL не найден. Скопируйте его в /switch/.overlays/SwitchInfoNX.ovl.",
+    "未找到 OVL。请将其复制到 /switch/.overlays/SwitchInfoNX.ovl。",
+    "OVL을 찾을 수 없습니다. /switch/.overlays/SwitchInfoNX.ovl에 복사하세요."};
+static const char *s_overlay_invalid[LANG_MAX] = {
+    "File found, but its ULTR signature is missing or invalid.",
+    "Fichier trouve, mais sa signature ULTR est absente ou invalide.",
+    "File trovato, ma la firma ULTR manca o non e valida.",
+    "Archivo encontrado, pero falta la firma ULTR o no es valida.",
+    "Datei gefunden, aber die ULTR-Signatur fehlt oder ist ungueltig.",
+    "Ficheiro encontrado, mas falta a assinatura ULTR ou e invalida.",
+    "Bestand gevonden, maar de ULTR-handtekening ontbreekt of is ongeldig.",
+    "ファイルはありますが、ULTR署名がないか無効です。",
+    "Файл найден, но подпись ULTR отсутствует или недействительна.",
+    "已找到文件，但缺少 ULTR 签名或签名无效。",
+    "파일을 찾았지만 ULTR 서명이 없거나 올바르지 않습니다."};
+enum {
+    OVERLAY_STATUS_UNKNOWN = -1,
+    OVERLAY_STATUS_MISSING,
+    OVERLAY_STATUS_INVALID,
+    OVERLAY_STATUS_DETECTED
+};
+static int overlay_status = OVERLAY_STATUS_UNKNOWN;
+
+static int detect_ultrahand_overlay(void) {
+    FILE *file = fopen("sdmc:/switch/.overlays/SwitchInfoNX.ovl", "rb");
+    if (!file)
+        return OVERLAY_STATUS_MISSING;
+
+    int status = OVERLAY_STATUS_INVALID;
+    if (fseek(file, -4, SEEK_END) == 0) {
+        char signature[4];
+        if (fread(signature, 1, sizeof(signature), file) == sizeof(signature) &&
+            memcmp(signature, "ULTR", sizeof(signature)) == 0)
+            status = OVERLAY_STATUS_DETECTED;
+    }
+    fclose(file);
+    return status;
+}
+
+static const char *overlay_status_text(int status) {
+    if (status == OVERLAY_STATUS_DETECTED)
+        return s_overlay_detected[cur_lang];
+    if (status == OVERLAY_STATUS_INVALID)
+        return s_overlay_invalid[cur_lang];
+    return s_overlay_missing[cur_lang];
+}
 static const char *s_sysmodule_desc[LANG_MAX] = {
     "A sysmodule must be a separate Horizon service; this app is not one.", "Un sysmodule est un service Horizon distinct; cette app n'en est pas un.", "Un sysmodule e un servizio Horizon separato; questa app non lo e.", "Un sysmodule es un servicio Horizon separado; esta app no lo es.",
     "Ein Sysmodul ist ein eigener Horizon-Dienst; diese App ist keiner.", "Um sysmodule e um servico Horizon separado; este app nao e.", "Een sysmodule is een aparte Horizon-service; deze app is dat niet.",
@@ -1996,6 +2333,18 @@ static const char *s_size_col[LANG_MAX] = {
     "Size",
     "Size",
     "Size"};
+static const char *s_size_sort_names[LANG_MAX][3] = {
+    {"TAP TO SORT", "LARGEST FIRST", "SMALLEST FIRST"},
+    {"TOUCHER POUR TRIER", "PLUS GROS D'ABORD", "PLUS PETIT D'ABORD"},
+    {"TOCCA PER ORDINARE", "PIU GRANDE PRIMA", "PIU PICCOLO PRIMA"},
+    {"TOCAR PARA ORDENAR", "MAYOR PRIMERO", "MENOR PRIMERO"},
+    {"ZUM SORTIEREN", "GROESSTE ZUERST", "KLEINSTE ZUERST"},
+    {"TOQUE PARA ORDENAR", "MAIOR PRIMEIRO", "MENOR PRIMEIRO"},
+    {"TIK OM TE SORTEREN", "GROOTSTE EERST", "KLEINSTE EERST"},
+    {"タップで並べ替え", "大きい順", "小さい順"},
+    {"НАЖМИТЕ ДЛЯ СОРТИРОВКИ", "СНАЧАЛА БОЛЬШИЕ", "СНАЧАЛА МАЛЕНЬКИЕ"},
+    {"点击排序", "从大到小", "从小到大"},
+    {"탭하여 정렬", "큰 항목 우선", "작은 항목 우선"}};
 static const char *s_dir_tag[LANG_MAX] = {
     "<DIR>", "<DOS>", "<CART>", "<DIR>",
     "<VERZ>", "<DIR>", "<MAP>",
@@ -2017,6 +2366,12 @@ static const char *s_fb_confirm_del[LANG_MAX] = {
     "[A] Confirm Delete  [B] Cancel",
     "[A] Confirm Delete  [B] Cancel",
     "[A] Confirm Delete  [B] Cancel"};
+static const char *s_fb_delete_btn[LANG_MAX] = {
+    "Delete", "Supprimer", "Elimina", "Eliminar", "Loeschen", "Excluir", "Verwijderen",
+    "削除", "Удалить", "删除", "삭제"};
+static const char *s_fb_rename_btn[LANG_MAX] = {
+    "Rename", "Renommer", "Rinomina", "Renombrar", "Umbenennen", "Renomear", "Hernoemen",
+    "名前変更", "Переименовать", "重命名", "이름 변경"};
 static const char *s_fb_browse_hint[LANG_MAX] = {
     "[A] Enter  [B] Back  [X] Delete  [Y] Rename",
     "[A] Entrer  [B] Retour  [X] Suppr.  [Y] Renommer",
@@ -2202,6 +2557,15 @@ static const char *theme_names[THEME_MAX] = {
 };
 
 static int settings_sel = 0; // 0=language, 1=theme, 2=auto-refresh
+static int ui_cursor_x = W / 2;
+static int ui_cursor_y = H / 2;
+static bool tutorial_completed = false;
+static bool tutorial_active = false;
+static bool tutorial_write_failed = false;
+static int tutorial_step = 0;
+static bool tesla_guide_active = false;
+static int tesla_guide_step = 0;
+static int save_backup_result = 0;
 
 // Custom theme editable colors
 static SDL_Color custom_bg       = {18,18,20,255};
@@ -2263,8 +2627,39 @@ static void apply_theme(void) {
     // red, yellow, purple, orange stay the same
 }
 
+static void apply_custom_theme_palette(int palette_index) {
+    static const SDL_Color palettes[3][10] = {
+        {
+            {8, 20, 36, 255}, {16, 36, 60, 255}, {32, 90, 130, 255},
+            {0, 195, 255, 255}, {80, 255, 190, 255}, {238, 248, 255, 255},
+            {145, 175, 198, 255}, {40, 65, 88, 255}, {12, 27, 46, 255},
+            {24, 48, 74, 255}
+        },
+        {
+            {32, 12, 22, 255}, {58, 22, 34, 255}, {128, 48, 56, 255},
+            {255, 125, 70, 255}, {255, 205, 100, 255}, {255, 242, 228, 255},
+            {205, 160, 150, 255}, {88, 48, 49, 255}, {42, 16, 28, 255},
+            {74, 30, 40, 255}
+        },
+        {
+            {9, 24, 18, 255}, {18, 43, 30, 255}, {42, 100, 68, 255},
+            {92, 230, 150, 255}, {185, 245, 110, 255}, {240, 250, 230, 255},
+            {155, 190, 155, 255}, {44, 72, 50, 255}, {13, 31, 22, 255},
+            {26, 53, 34, 255}
+        }
+    };
+    if (palette_index < 0 || palette_index >= 3) return;
+    SDL_Color *colors[10] = {
+        &custom_bg, &custom_card, &custom_border, &custom_cyan, &custom_green,
+        &custom_white, &custom_grey, &custom_dark_grey, &custom_bg2, &custom_bg3
+    };
+    for (int i = 0; i < 10; i++) *colors[i] = palettes[palette_index][i];
+    apply_theme();
+}
+
 // Config save/load
 #define CONFIG_PATH "sdmc:/switch/SwitchInfoNX/config.txt"
+#define TUTORIAL_PATH "sdmc:/switch/SwitchInfoNX/tutorial.json"
 static void save_config(void) {
     mkdir("sdmc:/switch", 0755);
     mkdir("sdmc:/switch/SwitchInfoNX", 0755);
@@ -2321,6 +2716,56 @@ static void load_config(void) {
     }
     fclose(f);
     apply_theme();
+}
+
+static bool tutorial_load_completed(bool *state_found) {
+    *state_found = false;
+    FILE *f = fopen(TUTORIAL_PATH, "r");
+    if (!f) return false;
+    char json[128] = {0};
+    size_t length = fread(json, 1, sizeof(json) - 1, f);
+    bool read_ok = !ferror(f);
+    fclose(f);
+    if (!read_ok || length == 0) return false;
+
+    char *value = strstr(json, "\"tuto\"");
+    if (!value) return false;
+    value = strchr(value, ':');
+    if (!value) return false;
+    value++;
+    while (*value == ' ' || *value == '\t' || *value == '\r' || *value == '\n') value++;
+    if (strncmp(value, "true", 4) == 0) {
+        *state_found = true;
+        return true;
+    }
+    if (strncmp(value, "false", 5) == 0) *state_found = true;
+    return false;
+}
+
+static bool tutorial_save_state(bool completed) {
+    mkdir("sdmc:/switch", 0755);
+    mkdir("sdmc:/switch/SwitchInfoNX", 0755);
+    FILE *f = fopen(TUTORIAL_PATH, "w");
+    if (!f) return false;
+    bool write_ok = fprintf(f, "{\n  \"tuto\": %s\n}\n",
+        completed ? "true" : "false") > 0;
+    if (fclose(f) != 0) write_ok = false;
+    return write_ok;
+}
+
+static void tutorial_finish(void) {
+    if (!tutorial_save_state(true)) {
+        tutorial_write_failed = true;
+        return;
+    }
+    tutorial_completed = true;
+    tutorial_active = false;
+    tutorial_write_failed = false;
+}
+
+static void tutorial_next(void) {
+    if (tutorial_step < 4) tutorial_step++;
+    else tutorial_finish();
 }
 
 // ─── Game Cartridge Reader ────────────────────────
@@ -2440,7 +2885,6 @@ static void scan_running_processes(void) {
         }
     }
 }
-
 // forward declaration
 static void add_alert(const char *msg);
 
@@ -4108,6 +4552,11 @@ static const char *s_batt_rate_label[LANG_MAX] = {
 
 // ─── Network Speed Test ────────────────────────────────────
 static volatile int net_test_running = 0;
+#define NET_PING_HIST_SIZE 20
+static float net_ping_history[NET_PING_HIST_SIZE] = {0};
+static int net_ping_history_pos = 0;
+static int net_ping_history_count = 0;
+static bool net_ping_capture_pending = false;
 
 #define NET_TEST_BUF_SIZE 4096
 #define NET_TEST_DURATION 5 // seconds per test
@@ -4232,11 +4681,11 @@ static void net_test_download(void) {
     // Cloudflare's own speed-test endpoints are designed for streamed GET
     // measurements and run on its global edge network.
     if (net_cloudflare_ready)
-        net_dl_mbps = net_download_from(net_cloudflare_addr, "speed.cloudflare.com", path, "SwitchInfoNX/0.4", "close", &net_dl_http_status);
+        net_dl_mbps = net_download_from(net_cloudflare_addr, "speed.cloudflare.com", path, "SwitchInfoNX/0.5", "close", &net_dl_http_status);
     if (net_dl_mbps > 0 || !net_test_running) return;
     if (net_fallback_ready) {
         int fallback_status = 0;
-        float fallback = net_download_from(net_fallback_addr, "speedtest.tele2.net", "/10MB.zip", "SwitchInfoNX/0.4", "close", &fallback_status);
+        float fallback = net_download_from(net_fallback_addr, "speedtest.tele2.net", "/10MB.zip", "SwitchInfoNX/0.5", "close", &fallback_status);
         if (fallback > 0) { net_dl_mbps = fallback; net_dl_http_status = fallback_status; }
         else if (fallback_status) net_dl_http_status = fallback_status;
     }
@@ -4283,11 +4732,11 @@ static void net_test_upload(void) {
     char path[64];
     snprintf(path, sizeof(path), "/__up?measId=%llu", (unsigned long long)armGetSystemTick());
     if (net_cloudflare_ready)
-        net_ul_mbps = net_upload_to(net_cloudflare_addr, "speed.cloudflare.com", "POST", path, "1.1", "SwitchInfoNX/0.4", "application/octet-stream", "close", true, &net_ul_http_status);
+        net_ul_mbps = net_upload_to(net_cloudflare_addr, "speed.cloudflare.com", "POST", path, "1.1", "SwitchInfoNX/0.5", "application/octet-stream", "close", true, &net_ul_http_status);
     if (net_ul_mbps > 0 || !net_test_running) return;
     if (net_fallback_ready) {
         int fallback_status = 0;
-        float fallback = net_upload_to(net_fallback_addr, "speedtest.tele2.net", "PUT", "/upload.php", "1.1", "SwitchInfoNX/0.4", "application/octet-stream", "close", true, &fallback_status);
+        float fallback = net_upload_to(net_fallback_addr, "speedtest.tele2.net", "PUT", "/upload.php", "1.1", "SwitchInfoNX/0.5", "application/octet-stream", "close", true, &fallback_status);
         if (fallback > 0) { net_ul_mbps = fallback; net_ul_http_status = fallback_status; }
         else if (fallback_status) net_ul_http_status = fallback_status;
     }
@@ -4375,6 +4824,7 @@ static void net_test_start(void) {
     rc = threadStart(&net_test_thr);
     if (R_FAILED(rc)) { net_test_running = 0; threadClose(&net_test_thr); net_dl_mbps = net_ul_mbps = -1; return; }
     net_test_started = true;
+    net_ping_capture_pending = true;
 }
 
 static const char *s_net_test_label[LANG_MAX] = {
@@ -4382,6 +4832,12 @@ static const char *s_net_test_label[LANG_MAX] = {
     "Netzwerk-Geschw.-Test", "Teste de velocidade de rede", "Netwerksnelheidstest",
     "ネットワーク速度テスト", "Тест скорости сети", "网络测速", "네트워크 속도 테스트"
 };
+static const char *s_net_ping_history[LANG_MAX] = {
+    "Ping history (last 20 tests)", "Historique ping (20 derniers tests)",
+    "Cronologia ping (ultimi 20 test)", "Historial ping (ultimas 20 pruebas)",
+    "Ping-Verlauf (letzte 20 Tests)", "Historico ping (ultimos 20 testes)",
+    "Pinggeschiedenis (laatste 20 tests)", "Ping履歴（直近20回）",
+    "История ping (20 тестов)", "Ping 历史（最近 20 次）", "Ping 기록 (최근 20회)"};
 static const char *s_net_dl[LANG_MAX] = {
     "Download: %.1f Mbps", "Download: %.1f Mbps", "Download: %.1f Mbps", "Descarga: %.1f Mbps",
     "Download: %.1f Mbps", "Download: %.1f Mbps", "Download: %.1f Mbps",
@@ -4608,7 +5064,8 @@ static void scan_installed_games(void) {
         installed_game_ids[installed_game_count] = rec.application_id;
         
         if (!get_installed_title_name(rec.application_id, installed_game_names[installed_game_count], sizeof(installed_game_names[0])))
-            snprintf(installed_game_names[installed_game_count], sizeof(installed_game_names[0]), "%s", s_unknown_game[cur_lang]);
+            snprintf(installed_game_names[installed_game_count], sizeof(installed_game_names[0]),
+                "Title ID: %016llX", (unsigned long long)rec.application_id);
         
         installed_game_count++;
         offset++;  // v0.3 fix: use list index, not application_id
@@ -4640,72 +5097,44 @@ static const char *s_profile_unavailable[LANG_MAX] = {
     "Profile unavailable", "Profil indisponible", "Profilo non disponibile", "Perfil no disponible", "Profil nicht verfuegbar", "Perfil indisponivel", "Profiel niet beschikbaar",
     "プロフィールを取得できません", "Профиль недоступен", "无法读取用户资料", "프로필을 사용할 수 없음"};
 static const char *s_save_manager_hint[LANG_MAX] = {
-    "Backups are stored on SD. Restore makes a safety copy first.",
-    "Copies sur SD. La restauration cree d'abord une copie de securite.",
-    "Backup su SD. Il ripristino crea prima una copia di sicurezza.",
-    "Copias en SD. Restaurar crea antes una copia de seguridad.",
-    "Sicherungen auf SD. Vor dem Wiederherstellen wird gesichert.",
-    "Copias no SD. O restauro cria primeiro uma copia de seguranca.",
-    "Back-ups op SD. Herstellen maakt eerst een veiligheidskopie.",
-    "SDに保存。復元前に現在のデータをバックアップします。",
-    "Копии на SD. Перед восстановлением создаётся резервная копия.",
-    "备份保存在 SD。恢复前先备份当前存档。",
-    "SD에 백업합니다. 복원 전에 현재 저장 데이터를 백업합니다."};
+    "Backups are stored on SD. Tap the backup selector to cycle; restore makes a safety copy. Missing profile? Relaunch in title mode.",
+    "Copies sur SD. Touchez le selecteur pour changer; la restauration cree une copie de securite.",
+    "Backup su SD. Tocca il selettore per cambiare; il ripristino crea prima una copia.",
+    "Copias en SD. Toca el selector para cambiar; restaurar crea antes una copia de seguridad.",
+    "Sicherungen auf SD. Sicherungsauswahl antippen; vor dem Wiederherstellen wird gesichert.",
+    "Copias no SD. Toque no seletor para trocar; o restauro cria primeiro uma copia de seguranca.",
+    "Back-ups op SD. Tik op de selector om te wisselen; herstellen maakt eerst een veiligheidskopie.",
+    "SDに保存。セレクターをタップして切り替えます。復元前に現在のデータを保存します。",
+    "Копии на SD. Коснитесь переключателя; перед восстановлением создаётся копия.",
+    "备份保存在 SD。点按选择器切换；恢复前会先备份当前存档。",
+    "SD에 백업합니다. 선택기를 눌러 변경하세요. 복원 전에 현재 데이터를 백업합니다."};
 static const char *s_save_backup_btn[LANG_MAX] = {
     "BACK UP", "SAUVEGARDER", "BACKUP", "COPIAR", "SICHERN", "BACKUP", "BACK-UP",
     "バックアップ", "СОЗДАТЬ КОПИЮ", "备份", "백업"};
+static const char *s_save_backup_history[LANG_MAX] = {
+    "Backup", "Sauvegarde", "Backup", "Copia", "Sicherung", "Backup", "Back-up",
+    "バックアップ", "Копия", "备份", "백업"};
+static const char *s_save_backup_success[LANG_MAX] = {
+    "Backup completed", "Sauvegarde effectuee", "Backup completato", "Copia completada",
+    "Sicherung abgeschlossen", "Backup concluido", "Back-up voltooid",
+    "バックアップ完了", "Копия создана", "备份已完成", "백업 완료"};
+static const char *s_save_backup_failure[LANG_MAX] = {
+    "Backup failed", "Sauvegarde non effectuee", "Backup non riuscito", "Copia no realizada",
+    "Sicherung fehlgeschlagen", "Backup nao concluido", "Back-up mislukt",
+    "バックアップ失敗", "Не удалось создать копию", "备份失败", "백업 실패"};
+static const char *s_save_backup_selector[LANG_MAX] = {
+    "Backup %d/%d", "Sauvegarde %d/%d", "Backup %d/%d", "Copia %d/%d",
+    "Sicherung %d/%d", "Backup %d/%d", "Back-up %d/%d",
+    "バックアップ %d/%d", "Копия %d/%d", "备份 %d/%d", "백업 %d/%d"};
+static const char *s_save_no_backups[LANG_MAX] = {
+    "No backups yet", "Aucune sauvegarde", "Nessun backup", "Sin copias", "Keine Sicherungen",
+    "Sem backups", "Nog geen back-ups", "バックアップなし", "Нет копий", "暂无备份", "백업 없음"};
 static const char *s_save_restore_btn[LANG_MAX] = {
-    "RESTORE LAST", "RESTAURER", "RIPRISTINA", "RESTAURAR", "WIEDERHERSTELLEN", "RESTAURAR", "HERSTEL",
-    "最新を復元", "ВОССТАНОВИТЬ", "恢复最新", "최근 백업 복원"};
+    "RESTORE SELECTED", "RESTAURER", "RIPRISTINA", "RESTAURAR", "AUSWAHL WIEDERHERSTELLEN", "RESTAURAR", "HERSTEL",
+    "選択を復元", "ВОССТАНОВИТЬ ВЫБРАННОЕ", "恢复所选", "선택 항목 복원"};
 static const char *s_save_restore_confirm_btn[LANG_MAX] = {
     "CONFIRM RESTORE", "CONFIRMER", "CONFERMA", "CONFIRMAR", "WIRKLICH?", "CONFIRMAR", "BEVESTIG",
     "復元を確認", "ПОДТВЕРДИТЬ", "确认恢复", "복원 확인"};
-
-// ─── Screenshot Capture ────────────────────────────────────
-static void capture_screenshot(SDL_Renderer *r) {
-    mkdir("sdmc:/switch", 0755);
-    mkdir("sdmc:/switch/SwitchInfoNX", 0755);
-    
-    time_t now = time(NULL);
-    struct tm *lt = localtime(&now);
-    char fname[128];
-    if (lt) {
-        snprintf(fname, sizeof(fname), "sdmc:/switch/SwitchInfoNX/screenshot_%04d%02d%02d_%02d%02d%02d.bmp",
-            lt->tm_year+1900, lt->tm_mon+1, lt->tm_mday, lt->tm_hour, lt->tm_min, lt->tm_sec);
-    } else {
-        snprintf(fname, sizeof(fname), "sdmc:/switch/SwitchInfoNX/screenshot.bmp");
-    }
-    
-    int w, h;
-    SDL_GetRendererOutputSize(r, &w, &h);
-    SDL_Surface *surf = SDL_CreateRGBSurface(0, w, h, 32, 0x00FF0000, 0x0000FF00, 0x000000FF, 0xFF000000);
-    if (surf) {
-        SDL_RenderReadPixels(r, NULL, SDL_PIXELFORMAT_ARGB8888, surf->pixels, surf->pitch);
-        SDL_SaveBMP(surf, fname);
-        SDL_FreeSurface(surf);
-        add_alert("Screenshot saved!");
-    } else {
-        add_alert("Screenshot failed!");
-    }
-}
-
-static const char *s_screenshot_btn[LANG_MAX] = {
-    "[Touch] Screenshot", "[Touch] Capture d'ecran", "[Touch] Screenshot", "[Touch] Captura pantalla",
-    "[Touch] Screenshot", "[Touch] Captura de tela", "[Touch] Schermafbeelding",
-    "[タッチ] スクリーンショット", "[Касание] Снимок экрана", "[触摸] 截图", "[터치] 스크린샷"
-};
-static const char *s_screenshot_title[LANG_MAX] = {
-    "Screenshot Capture", "Capture d'ecran", "Acquisizione schermata", "Captura de pantalla",
-    "Bildschirmaufnahme", "Captura de tela", "Schermafbeelding",
-    "スクリーンショット", "Снимок экрана", "屏幕截图", "스크린샷 캡처"
-};
-static const char *s_screenshot_desc[LANG_MAX] = {
-    "Save a screenshot of this page to the SD card.", "Enregistrer cette page sur la carte SD.",
-    "Salva questa schermata sulla scheda SD.", "Guarda esta pantalla en la tarjeta SD.",
-    "Diese Seite auf der SD-Karte speichern.", "Salve esta tela no cartao SD.",
-    "Sla dit scherm op de SD-kaart op.", "このページのスクリーンショットをSDカードに保存します。", "Сохранить снимок этой страницы на SD-карту.",
-    "将此页面截图保存到 SD 卡。", "이 페이지 화면을 SD 카드에 저장합니다."
-};
 
 // ─── Header bar ───────────────────────────────────────────
 
@@ -4849,22 +5278,61 @@ static int tools_scroll = 0;
 static int tools_scroll_max = 0;
 static int save_manager_loaded = 0;
 static int save_manager_selected = 0;
+static int save_backup_list_save = -1;
+static int save_backup_selected = 0;
 static AccountUid save_profile_uid = {{0}};
-static char save_profile_name[0x20] = {0};
+static char save_profile_name[64] = {0};
 static bool save_profile_cached = false;
 static u64 save_profile_retry_tick = 0;
+static bool account_init_ok = false;
+static u64 save_title_label_id = 0;
+static char save_title_label[256] = {0};
+static bool save_title_label_cached = false;
 
-static bool read_account_nickname(AccountUid uid, char *out, size_t out_size) {
+static bool read_account_nickname(AccountUid uid, char *out, size_t out_size, Result *error) {
     AccountProfile profile;
-    if (R_FAILED(accountGetProfile(&profile, uid))) return false;
+    Result rc = accountGetProfile(&profile, uid);
+    if (R_FAILED(rc)) {
+        if (error) *error = rc;
+        return false;
+    }
     AccountProfileBase base;
     memset(&base, 0, sizeof(base));
-    bool ok = R_SUCCEEDED(accountProfileGet(&profile, NULL, &base));
+    rc = accountProfileGet(&profile, NULL, &base);
+    bool ok = R_SUCCEEDED(rc);
     base.nickname[sizeof(base.nickname) - 1] = 0;
-    ok = ok && base.nickname[0];
+    ok = ok && base.nickname[0] && !memcmp(&base.uid, &uid, sizeof(uid));
     if (ok) snprintf(out, out_size, "%s", base.nickname);
     accountProfileClose(&profile);
+    if (!ok && error)
+        *error = R_FAILED(rc) ? rc : MAKERESULT(Module_Libnx, LibnxError_NotFound);
     return ok;
+}
+
+static const char *get_save_title_label(u64 title_id) {
+    if (save_title_label_cached && save_title_label_id == title_id) return save_title_label;
+
+    save_title_label_id = title_id;
+    save_title_label_cached = true;
+    save_title_label[0] = 0;
+    for (int i = 0; i < installed_game_count; ++i) {
+        bool name_known = installed_game_names[i][0] != 0;
+        for (int lang = 0; name_known && lang < LANG_MAX; ++lang)
+            if (strcmp(installed_game_names[i], s_unknown_game[lang]) == 0) name_known = false;
+        if (installed_game_ids[i] == title_id && name_known) {
+            size_t name_len = strnlen(installed_game_names[i], sizeof(installed_game_names[i]));
+            if (name_len >= sizeof(save_title_label)) name_len = sizeof(save_title_label) - 1;
+            memcpy(save_title_label, installed_game_names[i], name_len);
+            save_title_label[name_len] = 0;
+            return save_title_label;
+        }
+    }
+
+    if (!get_installed_title_name(title_id, save_title_label, sizeof(save_title_label))) {
+        snprintf(save_title_label, sizeof(save_title_label), "Title ID: %016llX",
+            (unsigned long long)title_id);
+    }
+    return save_title_label;
 }
 
 static const char *get_save_profile_name(AccountUid uid) {
@@ -4880,21 +5348,38 @@ static const char *get_save_profile_name(AccountUid uid) {
         save_profile_cached = true;
         return save_profile_name;
     }
-    bool loaded = read_account_nickname(uid, save_profile_name, sizeof(save_profile_name));
+    Result profile_error = 0;
+    if (!account_init_ok) {
+        profile_error = accountInitialize(AccountServiceType_Application);
+        account_init_ok = R_SUCCEEDED(profile_error);
+    }
+    if (!account_init_ok) {
+        snprintf(save_profile_name, sizeof(save_profile_name), "%s %04llX (%08X)",
+            s_profile_unavailable[cur_lang], (unsigned long long)(uid.uid[1] & 0xFFFF),
+            (unsigned)profile_error);
+        return save_profile_name;
+    }
+    bool loaded = read_account_nickname(uid, save_profile_name, sizeof(save_profile_name), &profile_error);
     if (!loaded) {
         AccountUid candidates[ACC_USER_LIST_SIZE];
         s32 candidate_count = 0;
-        if (R_SUCCEEDED(accountListAllUsers(candidates, ACC_USER_LIST_SIZE, &candidate_count))) {
+        Result list_rc = accountListAllUsers(candidates, ACC_USER_LIST_SIZE, &candidate_count);
+        if (R_SUCCEEDED(list_rc)) {
             if (candidate_count > ACC_USER_LIST_SIZE) candidate_count = ACC_USER_LIST_SIZE;
             for (s32 i = 0; i < candidate_count; ++i) {
                 if (!memcmp(&candidates[i], &uid, sizeof(uid))) {
-                    loaded = read_account_nickname(candidates[i], save_profile_name, sizeof(save_profile_name));
+                    loaded = read_account_nickname(candidates[i], save_profile_name,
+                        sizeof(save_profile_name), &profile_error);
                     break;
                 }
             }
-        }
+        } else if (R_SUCCEEDED(profile_error)) profile_error = list_rc;
     }
     if (loaded) save_profile_cached = true;
+    else if (R_FAILED(profile_error))
+        snprintf(save_profile_name, sizeof(save_profile_name), "%s %04llX (%08X)",
+            s_profile_unavailable[cur_lang], (unsigned long long)(uid.uid[1] & 0xFFFF),
+            (unsigned)profile_error);
     return save_profile_name;
 }
 static bool save_restore_confirm = false;
@@ -5027,8 +5512,12 @@ static void draw_pg0(SDL_Renderer *r) {
 
     if (batt_age_pct > 0.0) {
         snprintf(t, sizeof(t), "%.1f%%", batt_age_pct);
-        draw_key_value(r, "Battery Health", t, 690, ry, batt_age_pct >= 80.0 ? color_green : (batt_age_pct >= 65.0 ? color_yellow : color_red));
-        ry += 27;
+        SDL_Color health_color = batt_age_pct >= 80.0 ? color_green :
+            (batt_age_pct >= 65.0 ? color_yellow : color_red);
+        draw_key_value(r, s_battery_condition[cur_lang], t, 690, ry, health_color);
+        draw_progress_bar(r, 690, ry + 20, 510, 8, batt_age_pct / 100.0f,
+            health_color, color_dark_grey);
+        ry += 38;
     }
 
     if (batt_milli_volt > 0) {
@@ -5144,9 +5633,56 @@ static int fb_scroll = 0;
 static int fb_count = 0;
 static char fb_path[1024];
 static char fb_entries[FB_MAX_ENTRIES][260];
-static u32 fb_sizes[FB_MAX_ENTRIES];
+static u64 fb_sizes[FB_MAX_ENTRIES];
 static int fb_is_dir[FB_MAX_ENTRIES];
 static int fb_selected = 0;
+static int fb_sort_mode = 0;
+
+static bool fb_sort_entries(void) {
+    if (fb_count < 2) return true;
+    int *idx = malloc(fb_count * sizeof(int));
+    if (!idx) return false;
+    for (int i = 0; i < fb_count; i++) idx[i] = i;
+    for (int i = 0; i < fb_count - 1; i++) {
+        for (int j = 0; j < fb_count - 1 - i; j++) {
+            int a = idx[j], b = idx[j + 1];
+            int swap = 0;
+            if (fb_is_dir[a] != fb_is_dir[b])
+                swap = !fb_is_dir[a];
+            else if (fb_is_dir[a] || fb_sort_mode == 0)
+                swap = strcasecmp(fb_entries[a], fb_entries[b]) > 0;
+            else if (fb_sizes[a] != fb_sizes[b])
+                swap = fb_sort_mode == 1 ? fb_sizes[a] < fb_sizes[b] : fb_sizes[a] > fb_sizes[b];
+            else
+                swap = strcasecmp(fb_entries[a], fb_entries[b]) > 0;
+            if (swap) {
+                int tmp = idx[j];
+                idx[j] = idx[j + 1];
+                idx[j + 1] = tmp;
+            }
+        }
+    }
+
+    char (*tmp_entries)[260] = malloc(fb_count * sizeof(*tmp_entries));
+    u64 *tmp_sizes = malloc(fb_count * sizeof(*tmp_sizes));
+    int *tmp_is_dir = malloc(fb_count * sizeof(*tmp_is_dir));
+    bool sorted = tmp_entries && tmp_sizes && tmp_is_dir;
+    if (sorted) {
+        for (int i = 0; i < fb_count; i++) {
+            memcpy(tmp_entries[i], fb_entries[idx[i]], sizeof(tmp_entries[i]));
+            tmp_sizes[i] = fb_sizes[idx[i]];
+            tmp_is_dir[i] = fb_is_dir[idx[i]];
+        }
+        memcpy(fb_entries, tmp_entries, sizeof(fb_entries[0]) * fb_count);
+        memcpy(fb_sizes, tmp_sizes, sizeof(fb_sizes[0]) * fb_count);
+        memcpy(fb_is_dir, tmp_is_dir, sizeof(fb_is_dir[0]) * fb_count);
+    }
+    free(tmp_entries);
+    free(tmp_sizes);
+    free(tmp_is_dir);
+    free(idx);
+    return sorted;
+}
 
 static void fb_open(const char *path) {
     strncpy(fb_path, path, sizeof(fb_path)-1);
@@ -5162,10 +5698,10 @@ static void fb_open(const char *path) {
         snprintf(fp, sizeof(fp), "%s/%s", path, e->d_name);
         struct stat st;
         int is_dir = 0;
-        u32 sz = 0;
+        u64 sz = 0;
         if (stat(fp, &st) == 0) {
             is_dir = S_ISDIR(st.st_mode) ? 1 : 0;
-            sz = (u32)(st.st_size);
+            if (!is_dir && st.st_size > 0) sz = (u64)st.st_size;
         }
         snprintf(fb_entries[fb_count], sizeof(fb_entries[0]), "%s%s", e->d_name, is_dir ? "/" : "");
         fb_sizes[fb_count] = sz;
@@ -5174,44 +5710,7 @@ static void fb_open(const char *path) {
     }
     closedir(d);
 
-    // Sort: directories first (A-Z), then files (A-Z)
-    if (fb_count > 1) {
-        int *idx = malloc(fb_count * sizeof(int));
-        if (idx) {
-            for (int i = 0; i < fb_count; i++) idx[i] = i;
-            // Simple bubble sort
-            for (int i = 0; i < fb_count-1; i++) {
-                for (int j = 0; j < fb_count-1-i; j++) {
-                    int a = idx[j], b = idx[j+1];
-                    int swap = 0;
-                    if (fb_is_dir[a] && !fb_is_dir[b]) swap = 0;
-                    else if (!fb_is_dir[a] && fb_is_dir[b]) swap = 1;
-                    else if (strcasecmp(fb_entries[a], fb_entries[b]) > 0) swap = 1;
-                    if (swap) {
-                        int tmp = idx[j]; idx[j] = idx[j+1]; idx[j+1] = tmp;
-                    }
-                }
-            }
-            // Reorder arrays (heap-allocated to avoid stack overflow on Switch)
-            char (*tmp_entries)[260] = malloc(fb_count * sizeof(*tmp_entries));
-            u32  *tmp_sizes   = malloc(fb_count * sizeof(u32));
-            int  *tmp_is_dir  = malloc(fb_count * sizeof(int));
-            if (tmp_entries && tmp_sizes && tmp_is_dir) {
-                for (int i = 0; i < fb_count; i++) {
-                    strncpy(tmp_entries[i], fb_entries[idx[i]], sizeof(tmp_entries[0])-1);
-                    tmp_sizes[i] = fb_sizes[idx[i]];
-                    tmp_is_dir[i] = fb_is_dir[idx[i]];
-                }
-                memcpy(fb_entries, tmp_entries, sizeof(fb_entries[0]) * fb_count);
-                memcpy(fb_sizes, tmp_sizes, sizeof(fb_sizes[0]) * fb_count);
-                memcpy(fb_is_dir, tmp_is_dir, sizeof(fb_is_dir[0]) * fb_count);
-            }
-            free(tmp_entries);
-            free(tmp_sizes);
-            free(tmp_is_dir);
-            free(idx);
-        }
-    }
+    fb_sort_entries();
 
     fb_active = 1;
 }
@@ -5309,6 +5808,302 @@ static int app_mode = 0; // 0=normal, 1=overlay, 2=sysmodule
 // Storage button Y positions (dynamic, updated on draw)
 static int storage_test_btn_y = 0;
 static int storage_fb_btn_y = 0;
+static int storage_scan_button_y = 0;
+static int storage_scan_category_y = 0;
+static int storage_scan_details_y = 0;
+
+#define STORAGE_SCAN_MAX_ENTRIES 512
+enum {
+    STORAGE_CATEGORY_GAMES,
+    STORAGE_CATEGORY_HOMEBREW,
+    STORAGE_CATEGORY_CFW,
+    STORAGE_CATEGORY_MEDIA,
+    STORAGE_CATEGORY_OTHER,
+    STORAGE_CATEGORY_COUNT
+};
+enum {
+    STORAGE_SCAN_IDLE,
+    STORAGE_SCAN_RUNNING,
+    STORAGE_SCAN_COMPLETE,
+    STORAGE_SCAN_FAILED
+};
+
+typedef struct {
+    char name[256];
+    u64 size;
+    int category;
+    bool is_dir;
+} StorageScanEntry;
+
+typedef struct {
+    u64 files;
+    u64 folders;
+    u64 errors;
+} StorageScanProgress;
+
+static Mutex storage_scan_mutex;
+static bool storage_scan_mutex_ready = false;
+static Thread storage_scan_thread;
+static bool storage_scan_thread_started = false;
+static int storage_scan_state = STORAGE_SCAN_IDLE;
+static bool storage_scan_cancel = false;
+static bool storage_scan_cache_ready = false;
+static int storage_scan_detail_category = -1;
+static bool storage_scan_detail_ascending = false;
+static u64 storage_scan_category_bytes[STORAGE_CATEGORY_COUNT];
+static u64 storage_scan_files = 0;
+static u64 storage_scan_folders = 0;
+static u64 storage_scan_errors = 0;
+static StorageScanEntry storage_scan_entries[STORAGE_SCAN_MAX_ENTRIES];
+static int storage_scan_entry_count = 0;
+static int storage_scan_sorted_indices[STORAGE_CATEGORY_COUNT][STORAGE_SCAN_MAX_ENTRIES];
+static int storage_scan_category_entries[STORAGE_CATEGORY_COUNT];
+static bool storage_scan_truncated = false;
+
+static int storage_scan_category_for_entry(const char *name, bool is_dir) {
+    if (is_dir) {
+        if (strcasecmp(name, "Nintendo") == 0) return STORAGE_CATEGORY_GAMES;
+        if (strcasecmp(name, "switch") == 0) return STORAGE_CATEGORY_HOMEBREW;
+        if (strcasecmp(name, "atmosphere") == 0 || strcasecmp(name, "bootloader") == 0 ||
+            strcasecmp(name, "config") == 0 || strcasecmp(name, "emuMMC") == 0 ||
+            strcasecmp(name, "sept") == 0 || strcasecmp(name, "warmboot_mariko") == 0)
+            return STORAGE_CATEGORY_CFW;
+        if (strcasecmp(name, "Album") == 0 || strcasecmp(name, "DCIM") == 0 ||
+            strcasecmp(name, "Pictures") == 0 || strcasecmp(name, "Music") == 0 ||
+            strcasecmp(name, "Movies") == 0 || strcasecmp(name, "Downloads") == 0 ||
+            strcasecmp(name, "Documents") == 0)
+            return STORAGE_CATEGORY_MEDIA;
+        return STORAGE_CATEGORY_OTHER;
+    }
+
+    const char *ext = strrchr(name, '.');
+    if (!ext) return STORAGE_CATEGORY_OTHER;
+    ext++;
+    if (strcasecmp(ext, "xci") == 0 || strcasecmp(ext, "nsp") == 0 ||
+        strcasecmp(ext, "nsz") == 0 || strcasecmp(ext, "nca") == 0)
+        return STORAGE_CATEGORY_GAMES;
+    if (strcasecmp(ext, "jpg") == 0 || strcasecmp(ext, "jpeg") == 0 ||
+        strcasecmp(ext, "png") == 0 || strcasecmp(ext, "bmp") == 0 ||
+        strcasecmp(ext, "mp4") == 0 || strcasecmp(ext, "mov") == 0 ||
+        strcasecmp(ext, "avi") == 0 || strcasecmp(ext, "mkv") == 0 ||
+        strcasecmp(ext, "mp3") == 0 || strcasecmp(ext, "flac") == 0 ||
+        strcasecmp(ext, "wav") == 0 || strcasecmp(ext, "txt") == 0 ||
+        strcasecmp(ext, "pdf") == 0 || strcasecmp(ext, "md") == 0)
+        return STORAGE_CATEGORY_MEDIA;
+    return STORAGE_CATEGORY_OTHER;
+}
+
+static bool storage_scan_cancel_requested(void) {
+    mutexLock(&storage_scan_mutex);
+    bool cancel = storage_scan_cancel;
+    mutexUnlock(&storage_scan_mutex);
+    return cancel;
+}
+
+static u64 storage_scan_directory(const char *path, int depth, StorageScanProgress *progress) {
+    if (depth > 32) {
+        progress->errors++;
+        return 0;
+    }
+    DIR *dir = opendir(path);
+    if (!dir) {
+        progress->errors++;
+        return 0;
+    }
+
+    progress->folders++;
+    u64 total = 0;
+    struct dirent *entry;
+    while ((entry = readdir(dir)) != NULL) {
+        if (!strcmp(entry->d_name, ".") || !strcmp(entry->d_name, "..")) continue;
+        if ((progress->files & 31u) == 0 && storage_scan_cancel_requested()) break;
+
+        char child[1024];
+        int length = snprintf(child, sizeof(child), "%s/%s", path, entry->d_name);
+        if (length < 0 || (size_t)length >= sizeof(child)) {
+            progress->errors++;
+            continue;
+        }
+        struct stat st;
+        if (stat(child, &st) != 0) {
+            progress->errors++;
+            continue;
+        }
+        u64 size = 0;
+        if (S_ISDIR(st.st_mode)) {
+            size = storage_scan_directory(child, depth + 1, progress);
+        } else if (S_ISREG(st.st_mode)) {
+            progress->files++;
+            if (st.st_size > 0) size = (u64)st.st_size;
+            if ((progress->files & 31u) == 0) {
+                mutexLock(&storage_scan_mutex);
+                storage_scan_files = progress->files;
+                storage_scan_folders = progress->folders;
+                mutexUnlock(&storage_scan_mutex);
+            }
+        }
+        if (UINT64_MAX - total < size) {
+            total = UINT64_MAX;
+            progress->errors++;
+        } else {
+            total += size;
+        }
+    }
+    closedir(dir);
+    return total;
+}
+
+static void storage_scan_worker(void *arg) {
+    (void)arg;
+    StorageScanProgress progress = {0, 0, 0};
+    DIR *root = opendir("sdmc:/");
+    if (!root) {
+        mutexLock(&storage_scan_mutex);
+        storage_scan_state = STORAGE_SCAN_FAILED;
+        storage_scan_errors = 1;
+        mutexUnlock(&storage_scan_mutex);
+        return;
+    }
+
+    struct dirent *entry;
+    while ((entry = readdir(root)) != NULL) {
+        if (!strcmp(entry->d_name, ".") || !strcmp(entry->d_name, "..")) continue;
+        if (storage_scan_cancel_requested()) break;
+
+        char path[1024];
+        int length = snprintf(path, sizeof(path), "sdmc:/%s", entry->d_name);
+        if (length < 0 || (size_t)length >= sizeof(path)) {
+            progress.errors++;
+            continue;
+        }
+        struct stat st;
+        if (stat(path, &st) != 0) {
+            progress.errors++;
+            continue;
+        }
+        bool is_dir = S_ISDIR(st.st_mode);
+        int category = storage_scan_category_for_entry(entry->d_name, is_dir);
+        u64 size = 0;
+        if (is_dir) {
+            size = storage_scan_directory(path, 0, &progress);
+        } else if (S_ISREG(st.st_mode)) {
+            progress.files++;
+            if (st.st_size > 0) size = (u64)st.st_size;
+        }
+
+        mutexLock(&storage_scan_mutex);
+        if (UINT64_MAX - storage_scan_category_bytes[category] < size) {
+            storage_scan_category_bytes[category] = UINT64_MAX;
+            progress.errors++;
+        } else {
+            storage_scan_category_bytes[category] += size;
+        }
+        if (storage_scan_entry_count < STORAGE_SCAN_MAX_ENTRIES) {
+            StorageScanEntry *item = &storage_scan_entries[storage_scan_entry_count++];
+            snprintf(item->name, sizeof(item->name), "%s", entry->d_name);
+            item->size = size;
+            item->category = category;
+            item->is_dir = is_dir;
+        } else {
+            storage_scan_truncated = true;
+        }
+        storage_scan_files = progress.files;
+        storage_scan_folders = progress.folders;
+        mutexUnlock(&storage_scan_mutex);
+    }
+    closedir(root);
+
+    mutexLock(&storage_scan_mutex);
+    storage_scan_files = progress.files;
+    storage_scan_folders = progress.folders;
+    storage_scan_errors = progress.errors;
+    storage_scan_state = storage_scan_cancel ? STORAGE_SCAN_IDLE : STORAGE_SCAN_COMPLETE;
+    mutexUnlock(&storage_scan_mutex);
+}
+
+static void storage_scan_prepare_cache(void) {
+    mutexLock(&storage_scan_mutex);
+    if (storage_scan_cache_ready || storage_scan_state != STORAGE_SCAN_COMPLETE) {
+        mutexUnlock(&storage_scan_mutex);
+        return;
+    }
+    memset(storage_scan_category_entries, 0, sizeof(storage_scan_category_entries));
+    for (int i = 0; i < storage_scan_entry_count; i++) {
+        int category = storage_scan_entries[i].category;
+        int count = storage_scan_category_entries[category]++;
+        storage_scan_sorted_indices[category][count] = i;
+    }
+    for (int category = 0; category < STORAGE_CATEGORY_COUNT; category++) {
+        int count = storage_scan_category_entries[category];
+        for (int i = 0; i < count - 1; i++) {
+            for (int j = 0; j < count - 1 - i; j++) {
+                int a = storage_scan_sorted_indices[category][j];
+                int b = storage_scan_sorted_indices[category][j + 1];
+                if (storage_scan_entries[a].size < storage_scan_entries[b].size) {
+                    storage_scan_sorted_indices[category][j] = b;
+                    storage_scan_sorted_indices[category][j + 1] = a;
+                }
+            }
+        }
+    }
+    storage_scan_cache_ready = true;
+    mutexUnlock(&storage_scan_mutex);
+}
+
+static void storage_scan_start(void) {
+    mutexLock(&storage_scan_mutex);
+    if (storage_scan_state == STORAGE_SCAN_RUNNING) {
+        mutexUnlock(&storage_scan_mutex);
+        return;
+    }
+    mutexUnlock(&storage_scan_mutex);
+
+    if (storage_scan_thread_started) {
+        threadWaitForExit(&storage_scan_thread);
+        threadClose(&storage_scan_thread);
+        storage_scan_thread_started = false;
+    }
+    mutexLock(&storage_scan_mutex);
+    memset(storage_scan_category_bytes, 0, sizeof(storage_scan_category_bytes));
+    storage_scan_files = storage_scan_folders = storage_scan_errors = 0;
+    storage_scan_entry_count = 0;
+    storage_scan_truncated = false;
+    storage_scan_cache_ready = false;
+    storage_scan_detail_category = -1;
+    storage_scan_detail_ascending = false;
+    storage_scan_cancel = false;
+    storage_scan_state = STORAGE_SCAN_RUNNING;
+    mutexUnlock(&storage_scan_mutex);
+
+    Result rc = threadCreate(&storage_scan_thread, storage_scan_worker, NULL, NULL, 131072, 0x2B, -2);
+    if (R_FAILED(rc)) {
+        mutexLock(&storage_scan_mutex);
+        storage_scan_state = STORAGE_SCAN_FAILED;
+        storage_scan_errors = 1;
+        mutexUnlock(&storage_scan_mutex);
+        return;
+    }
+    rc = threadStart(&storage_scan_thread);
+    if (R_FAILED(rc)) {
+        threadClose(&storage_scan_thread);
+        mutexLock(&storage_scan_mutex);
+        storage_scan_state = STORAGE_SCAN_FAILED;
+        storage_scan_errors = 1;
+        mutexUnlock(&storage_scan_mutex);
+        return;
+    }
+    storage_scan_thread_started = true;
+}
+
+static void storage_scan_cleanup(void) {
+    if (!storage_scan_mutex_ready || !storage_scan_thread_started) return;
+    mutexLock(&storage_scan_mutex);
+    storage_scan_cancel = true;
+    mutexUnlock(&storage_scan_mutex);
+    threadWaitForExit(&storage_scan_thread);
+    threadClose(&storage_scan_thread);
+    storage_scan_thread_started = false;
+}
 
 // Popup for "En developpement" messages
 static bool popup_active = false;
@@ -5324,7 +6119,7 @@ static void draw_pg1(SDL_Renderer *r) {
 
     int view_top = 130, view_bottom = 655;
     int view_h = view_bottom - view_top;
-    int content_bottom = 740;
+    int content_bottom = 900;
     int content_h = content_bottom - view_top;
     storage_scroll_max = content_h > view_h ? content_h - view_h : 0;
     if (storage_scroll > storage_scroll_max) storage_scroll = storage_scroll_max;
@@ -5358,7 +6153,7 @@ static void draw_pg1(SDL_Renderer *r) {
             sy += 28;
 
             draw_text(r, font_sm, s_storage_usage[cur_lang], 70, sy, color_grey, 0);
-            draw_progress_bar(r, 240, sy + 2, 350, 16, (float)used / tot, clr, color_dark_grey);
+            draw_progress_bar(r, 300, sy + 2, 290, 16, (float)used / tot, clr, color_dark_grey);
             sy += 32;
 
             if (sd_speed_result > 0) {
@@ -5452,63 +6247,111 @@ static void draw_pg1(SDL_Renderer *r) {
     draw_rounded_rect(r, 960, ny, 250, 42, 8, color_grey);
     draw_text_w(r, font_sm, s_touch_test[cur_lang], 1085, ny + 10, color_white, 1, 235);
 
-    // ── Bottom Card: SD Content Breakdown (Height 190) ──
-    draw_card(r, 40, 500 - sc, 1200, 190, s_sd_breakdown[cur_lang]);
-    DIR *sd_root = opendir("sdmc:/");
-    if (sd_root) {
-        int dirs = 0, pics = 0, vids = 0, music = 0, docs = 0, nros = 0, roms = 0, other = 0;
-        struct dirent *e;
-        while ((e = readdir(sd_root)) != NULL) {
-            if (e->d_name[0] == '.') continue;
-            char fp[300]; snprintf(fp, sizeof(fp), "sdmc:/%s", e->d_name);
-            struct stat st;
-            if (stat(fp, &st) == 0 && S_ISDIR(st.st_mode)) { dirs++; continue; }
-            const char *ext = strrchr(e->d_name, '.');
-            if (!ext) { other++; continue; }
-            ext++;
-            if (strcmp(ext, "jpg")==0||strcmp(ext, "jpeg")==0||strcmp(ext, "png")==0||strcmp(ext, "bmp")==0) pics++;
-            else if (strcmp(ext, "mp4")==0||strcmp(ext, "mov")==0||strcmp(ext, "avi")==0||strcmp(ext, "mkv")==0) vids++;
-            else if (strcmp(ext, "mp3")==0||strcmp(ext, "flac")==0||strcmp(ext, "wav")==0) music++;
-            else if (strcmp(ext, "txt")==0||strcmp(ext, "pdf")==0||strcmp(ext, "md")==0) docs++;
-            else if (strcmp(ext, "nro")==0) nros++;
-            else if (strcmp(ext, "xci")==0||strcmp(ext, "nsp")==0||strcmp(ext, "nsz")==0) roms++;
-            else other++;
+    // ── SD space analyzer ──
+    draw_card(r, 40, 500 - sc, 1200, 380, s_sd_breakdown[cur_lang]);
+    storage_scan_button_y = 510;
+    storage_scan_category_y = 586;
+    storage_scan_details_y = 722;
+    draw_rounded_box(r, 1000, storage_scan_button_y - sc, 210, 34, 6, color_card_border);
+    draw_rounded_rect(r, 1000, storage_scan_button_y - sc, 210, 34, 6, color_cyan);
+    draw_text_w(r, font_xs, s_sd_scan_button[cur_lang], 1105, storage_scan_button_y + 8 - sc, color_white, 1, 196);
+
+    storage_scan_prepare_cache();
+    int scan_state, selected_category;
+    u64 scan_files, scan_folders, scan_errors;
+    u64 category_bytes[STORAGE_CATEGORY_COUNT];
+    bool scan_truncated;
+    StorageScanEntry detail_entries[5];
+    int detail_count = 0, category_entry_count = 0;
+    bool detail_ascending;
+    mutexLock(&storage_scan_mutex);
+    scan_state = storage_scan_state;
+    scan_files = storage_scan_files;
+    scan_folders = storage_scan_folders;
+    scan_errors = storage_scan_errors;
+    scan_truncated = storage_scan_truncated;
+    memcpy(category_bytes, storage_scan_category_bytes, sizeof(category_bytes));
+    selected_category = storage_scan_detail_category;
+    detail_ascending = storage_scan_detail_ascending;
+    if (scan_state == STORAGE_SCAN_COMPLETE && selected_category >= 0 &&
+        selected_category < STORAGE_CATEGORY_COUNT && storage_scan_cache_ready) {
+        category_entry_count = storage_scan_category_entries[selected_category];
+        detail_count = category_entry_count < 5 ? category_entry_count : 5;
+        for (int i = 0; i < detail_count; i++) {
+            int order = detail_ascending ? category_entry_count - 1 - i : i;
+            int idx = storage_scan_sorted_indices[selected_category][order];
+            detail_entries[i] = storage_scan_entries[idx];
         }
-        closedir(sd_root);
+    }
+    mutexUnlock(&storage_scan_mutex);
 
-        int bx = 70;
-        int by = 590 - sc;
-        snprintf(t, sizeof(t), s_folders[cur_lang], dirs);
-        draw_text(r, font_sm, t, bx, by, color_yellow, 0); bx += 180;
-        snprintf(t, sizeof(t), s_nro_count[cur_lang], nros);
-        draw_text(r, font_sm, t, bx, by, color_cyan, 0); bx += 150;
-        snprintf(t, sizeof(t), s_images[cur_lang], pics);
-        draw_text(r, font_sm, t, bx, by, color_white, 0); bx += 160;
-        snprintf(t, sizeof(t), s_videos[cur_lang], vids);
-        draw_text(r, font_sm, t, bx, by, color_white, 0); bx += 160;
+    if (scan_state == STORAGE_SCAN_IDLE) {
+        draw_text_w(r, font_xs, s_sd_scan_prompt[cur_lang], 70, 555 - sc, color_grey, 0, 900);
+    } else if (scan_state == STORAGE_SCAN_RUNNING) {
+        snprintf(t, sizeof(t), s_sd_scan_running[cur_lang],
+            (unsigned long long)scan_files, (unsigned long long)scan_folders);
+        draw_text_w(r, font_xs, t, 70, 555 - sc, color_yellow, 0, 900);
+        int phase = (int)((armGetSystemTick() / (armGetSystemTickFreq() / 30 + 1)) % 8);
+        draw_progress_bar(r, 70, 571 - sc, 1140, 6, (phase + 1) / 8.0f, color_cyan, color_dark_grey);
+    } else if (scan_state == STORAGE_SCAN_FAILED) {
+        draw_text_w(r, font_xs, s_sd_scan_failed[cur_lang], 70, 555 - sc, color_red, 0, 900);
+    } else {
+        char extra[64] = "";
+        if (scan_errors)
+            snprintf(extra, sizeof(extra), " (%llu skipped)", (unsigned long long)scan_errors);
+        else if (scan_truncated)
+            snprintf(extra, sizeof(extra), " (root list limited)");
+        snprintf(t, sizeof(t), s_sd_scan_done[cur_lang],
+            (unsigned long long)scan_files, (unsigned long long)scan_folders, extra);
+        draw_text_w(r, font_xs, t, 70, 555 - sc, scan_errors ? color_yellow : color_green, 0, 900);
 
-        bx = 70; by = 620 - sc;
-        snprintf(t, sizeof(t), s_music[cur_lang], music);
-        draw_text(r, font_sm, t, bx, by, color_white, 0); bx += 160;
-        snprintf(t, sizeof(t), s_games[cur_lang], roms);
-        draw_text(r, font_sm, t, bx, by, color_purple, 0); bx += 160;
-        snprintf(t, sizeof(t), s_docs[cur_lang], docs);
-        draw_text(r, font_sm, t, bx, by, color_white, 0); bx += 150;
-        snprintf(t, sizeof(t), s_other[cur_lang], other);
-        draw_text(r, font_sm, t, bx, by, color_grey, 0); bx += 150;
+        u64 analyzed_bytes = 0;
+        for (int i = 0; i < STORAGE_CATEGORY_COUNT; i++)
+            analyzed_bytes += category_bytes[i];
+        char bytes_text[32];
+        format_bytes(analyzed_bytes, bytes_text, sizeof(bytes_text));
+        snprintf(t, sizeof(t), "%s: %s", s_sd_scan_total[cur_lang], bytes_text);
+        draw_text(r, font_xs, t, 70, 572 - sc, color_grey, 0);
 
-        DIR *sw_dir = opendir("sdmc:/switch");
-        int sw_items = 0;
-        if (sw_dir) {
-            struct dirent *e2;
-            while ((e2 = readdir(sw_dir)) != NULL) {
-                if (strcmp(e2->d_name, ".")==0||strcmp(e2->d_name, "..")==0) continue;
-                sw_items++;
-            }
-            closedir(sw_dir);
+        static const SDL_Color category_colors[STORAGE_CATEGORY_COUNT] = {
+            {170, 120, 255, 255}, {0, 210, 255, 255}, {255, 190, 80, 255},
+            {80, 220, 150, 255}, {150, 160, 175, 255}
+        };
+        for (int i = 0; i < STORAGE_CATEGORY_COUNT; i++) {
+            int row_y = storage_scan_category_y + i * 27 - sc;
+            u32 share = analyzed_bytes ? (u32)((double)category_bytes[i] * 100.0 / (double)analyzed_bytes) : 0;
+            if (i == selected_category)
+                draw_rounded_box(r, 60, row_y - 2, 1160, 24, 4, color_bg3);
+            draw_text_w(r, font_xs, s_sd_scan_categories[cur_lang][i], 70, row_y, category_colors[i], 0, 250);
+            draw_progress_bar(r, 335, row_y + 3, 630, 12,
+                analyzed_bytes ? (float)((double)category_bytes[i] / (double)analyzed_bytes) : 0.0f,
+                category_colors[i], color_dark_grey);
+            format_bytes(category_bytes[i], bytes_text, sizeof(bytes_text));
+            snprintf(t, sizeof(t), "%s  %u%%", bytes_text, share);
+            draw_text(r, font_xs, t, 1200, row_y, color_white, 2);
         }
-        snprintf(t, sizeof(t), s_homebrew_count[cur_lang], sw_items);
-        draw_text(r, font_sm, t, 70, 660 - sc, color_cyan, 0);
+
+        draw_text_w(r, font_xs, s_sd_scan_details[cur_lang], 70, storage_scan_details_y - sc,
+            color_grey, 0, 850);
+        if (selected_category >= 0 && selected_category < STORAGE_CATEGORY_COUNT)
+            draw_text_w(r, font_xs,
+                s_size_sort_names[cur_lang][detail_ascending ? 2 : 1],
+                1200, storage_scan_details_y - sc, color_cyan, 2, 300);
+        for (int i = 0; i < detail_count; i++) {
+            int row_y = storage_scan_details_y + 27 + i * 20 - sc;
+            char item_label[280];
+            snprintf(item_label, sizeof(item_label), "%.255s%s",
+                detail_entries[i].name, detail_entries[i].is_dir ? "/" : "");
+            draw_text_w(r, font_xs, item_label, 80, row_y,
+                detail_entries[i].is_dir ? color_yellow : color_white, 0, 950);
+            format_bytes(detail_entries[i].size, bytes_text, sizeof(bytes_text));
+            draw_text(r, font_xs, bytes_text, 1200, row_y, color_cyan, 2);
+        }
+        if (category_entry_count > detail_count) {
+            snprintf(t, sizeof(t), "+ %d more; open the file browser to browse all entries.",
+                category_entry_count - detail_count);
+            draw_text(r, font_xs, t, 80, storage_scan_details_y + 27 + detail_count * 20 - sc, color_grey, 0);
+        }
     }
 
     if (storage_scroll_max > 0) {
@@ -5525,12 +6368,81 @@ static void draw_pg1(SDL_Renderer *r) {
 static int wifi_hist[WIFI_HIST_SIZE] = {0};
 static int wifi_hist_pos = 0;
 static int wifi_hist_count = 0;
+static u64 wifi_hist_last_tick = 0;
+
+typedef struct {
+    u64 tick;
+    u64 received;
+    u64 sent;
+} NetworkTrafficSample;
+
+#define NETWORK_TRAFFIC_HISTORY 60
+static NetworkTrafficSample network_traffic_history[NETWORK_TRAFFIC_HISTORY];
+static int network_traffic_pos = 0;
+static int network_traffic_count = 0;
+static u64 network_traffic_rx_rate = 0;
+static u64 network_traffic_tx_rate = 0;
+static u64 network_traffic_rx_total = 0;
+static u64 network_traffic_tx_total = 0;
+static u64 network_traffic_rx_session = 0;
+static u64 network_traffic_tx_session = 0;
+static u64 network_traffic_last_tick = 0;
+static u64 network_traffic_last_attempt_tick = 0;
+static NetworkCounterErrors network_traffic_errors = {0, 0, 0};
+static bool network_traffic_has_baseline = false;
+static bool network_traffic_available = false;
+
+static void network_sample_traffic(void) {
+    u64 now = armGetSystemTick();
+    u64 frequency = armGetSystemTickFreq();
+    if (network_traffic_last_attempt_tick &&
+        now - network_traffic_last_attempt_tick < frequency)
+        return;
+    network_traffic_last_attempt_tick = now;
+
+    NetworkCounters counters = {0, 0};
+    if (!network_counters_read(&counters, &network_traffic_errors)) {
+        network_traffic_available = false;
+        network_traffic_rx_rate = 0;
+        network_traffic_tx_rate = 0;
+        network_traffic_has_baseline = false;
+        return;
+    }
+
+    if (network_traffic_has_baseline && now > network_traffic_last_tick) {
+        double elapsed = (double)(now - network_traffic_last_tick) /
+            (double)armGetSystemTickFreq();
+        u64 received_delta = counters.received >= network_traffic_rx_total ?
+            counters.received - network_traffic_rx_total : counters.received;
+        u64 sent_delta = counters.sent >= network_traffic_tx_total ?
+            counters.sent - network_traffic_tx_total : counters.sent;
+        network_traffic_rx_rate = (u64)((double)received_delta / elapsed);
+        network_traffic_tx_rate = (u64)((double)sent_delta / elapsed);
+        network_traffic_rx_session += received_delta;
+        network_traffic_tx_session += sent_delta;
+    } else {
+        network_traffic_rx_rate = 0;
+        network_traffic_tx_rate = 0;
+    }
+
+    network_traffic_rx_total = counters.received;
+    network_traffic_tx_total = counters.sent;
+    network_traffic_last_tick = now;
+    network_traffic_has_baseline = true;
+    network_traffic_available = true;
+    network_traffic_errors = (NetworkCounterErrors){0, 0, 0};
+    network_traffic_history[network_traffic_pos].tick = now;
+    network_traffic_history[network_traffic_pos].received = network_traffic_rx_rate;
+    network_traffic_history[network_traffic_pos].sent = network_traffic_tx_rate;
+    network_traffic_pos = (network_traffic_pos + 1) % NETWORK_TRAFFIC_HISTORY;
+    if (network_traffic_count < NETWORK_TRAFFIC_HISTORY) network_traffic_count++;
+}
 
 // Network
 static void draw_pg2(SDL_Renderer *r) {
     char t[128];
 
-    int content_bottom = 880;
+    int content_bottom = 1140;
     int view_top = 140, view_bottom = 650;
     int view_h = view_bottom - view_top;
     int content_h = content_bottom - view_top;
@@ -5627,7 +6539,7 @@ static void draw_pg2(SDL_Renderer *r) {
     }
 
     // Network Speed Test card (below IP config, left column)
-    draw_card(r, 40, 540 - sc, 580, 160, s_net_test_label[cur_lang]);
+    draw_card(r, 40, 540 - sc, 580, 180, s_net_test_label[cur_lang]);
     draw_rounded_box(r, 365, 600 - sc, 220, 36, 6, net_test_running ? color_dark_grey : color_card_border);
     draw_rounded_rect(r, 365, 600 - sc, 220, 36, 6, color_cyan);
     draw_text_w(r, font_sm, net_test_running ? s_net_testing[cur_lang] : s_net_test_btn[cur_lang], 475, 608 - sc, color_white, 1, 204);
@@ -5651,7 +6563,40 @@ static void draw_pg2(SDL_Renderer *r) {
         else snprintf(t, sizeof(t), "Upload: %s", s_error[cur_lang]);
         draw_text_w(r, font_xs, t, 70, ny, net_ul_mbps > 0 ? color_green : color_red, 0, 270);
     }
-    draw_text(r, font_xs, "Download/upload use Nintendo test servers", 70, 680 - sc, color_grey, 0);
+    draw_text_w(r, font_xs, s_net_ping_history[cur_lang], 70, 652 - sc, color_grey, 0, 500);
+    int ping_chart_x = 110, ping_chart_y = 670 - sc, ping_chart_w = 470, ping_chart_h = 24;
+    draw_rounded_rect(r, ping_chart_x, ping_chart_y, ping_chart_w, ping_chart_h, 3, color_dark_grey);
+    lineRGBA(r, ping_chart_x, ping_chart_y + ping_chart_h / 2,
+        ping_chart_x + ping_chart_w - 1, ping_chart_y + ping_chart_h / 2, 100, 100, 100, 80);
+    if (net_ping_history_count > 0) {
+        int first = (net_ping_history_pos - net_ping_history_count + NET_PING_HIST_SIZE) % NET_PING_HIST_SIZE;
+        int previous_x = 0, previous_y = 0;
+        for (int i = 0; i < net_ping_history_count; i++) {
+            int idx = (first + i) % NET_PING_HIST_SIZE;
+            float ping = net_ping_history[idx];
+            if (ping > 200.0f) ping = 200.0f;
+            int px = ping_chart_x + ping_chart_w - 1 -
+                (net_ping_history_count - 1 - i) * (ping_chart_w - 1) / (NET_PING_HIST_SIZE - 1);
+            int py = ping_chart_y + ping_chart_h - 1 -
+                (int)(ping * (ping_chart_h - 1) / 200.0f);
+            SDL_Color ping_color = ping < 50.0f ? color_green :
+                (ping < 120.0f ? color_yellow : color_red);
+            if (i > 0)
+                thickLineRGBA(r, previous_x, previous_y, px, py, 2,
+                    ping_color.r, ping_color.g, ping_color.b, 220);
+            filledCircleRGBA(r, px, py, i == net_ping_history_count - 1 ? 3 : 2,
+                ping_color.r, ping_color.g, ping_color.b, 240);
+            previous_x = px;
+            previous_y = py;
+        }
+    } else {
+        draw_text(r, font_xs, s_net_testing[cur_lang], ping_chart_x + ping_chart_w / 2,
+            ping_chart_y + 4, color_grey, 1);
+    }
+    draw_text(r, font_xs, "0 ms", 70, ping_chart_y + 4, color_grey, 0);
+    draw_text(r, font_xs, "200", 595, ping_chart_y + 4, color_grey, 2);
+    draw_text_w(r, font_xs, "Speed test uses public test servers",
+        70, 700 - sc, color_grey, 0, 500);
 
     draw_card(r, 660, 420 - sc, 580, 280, s_wifi_diag[cur_lang]);
     if (R_SUCCEEDED(wlaninfInitialize())) {
@@ -5673,21 +6618,30 @@ static void draw_pg2(SDL_Renderer *r) {
                 draw_text(r, font_sm, s_signal_power[cur_lang], 690, 595 - sc, color_grey, 0);
                 draw_progress_bar(r, 870, 597 - sc, 330, 16, qual / 100.f, get_usage_color(100 - qual), color_dark_grey);
 
-                wifi_hist[wifi_hist_pos] = qual;
-                wifi_hist_pos = (wifi_hist_pos + 1) % WIFI_HIST_SIZE;
-                if (wifi_hist_count < WIFI_HIST_SIZE) wifi_hist_count++;
+                u64 sample_tick = armGetSystemTick();
+                if (!wifi_hist_last_tick ||
+                    sample_tick - wifi_hist_last_tick >= armGetSystemTickFreq()) {
+                    wifi_hist_last_tick = sample_tick;
+                    wifi_hist[wifi_hist_pos] = qual;
+                    wifi_hist_pos = (wifi_hist_pos + 1) % WIFI_HIST_SIZE;
+                    if (wifi_hist_count < WIFI_HIST_SIZE) wifi_hist_count++;
+                }
                 draw_text(r, font_xs, s_signal_history[cur_lang], 690, 625 - sc, color_grey, 0);
-                int chart_x = 870, chart_y = 622 - sc, chart_w = 330, chart_h = 30;
+                int chart_x = 870, chart_y = 622 - sc, chart_w = 330, chart_h = 38;
                 draw_rounded_rect(r, chart_x, chart_y, chart_w, chart_h, 3, color_dark_grey);
+                lineRGBA(r, chart_x, chart_y + chart_h / 2, chart_x + chart_w - 1,
+                    chart_y + chart_h / 2, 110, 110, 110, 85);
                 int hc = wifi_hist_count;
                 if (hc > WIFI_HIST_SIZE) hc = WIFI_HIST_SIZE;
                 for (int si = 0; si < hc - 1; si++) {
                     int x1 = chart_x + chart_w - (si+1) * chart_w / hc;
                     int x2 = chart_x + chart_w - (si+2) * chart_w / hc;
-                    int y1 = chart_y + chart_h - wifi_hist[(wifi_hist_pos - si - 1 + WIFI_HIST_SIZE) % WIFI_HIST_SIZE] * chart_h / 100;
-                    int y2 = chart_y + chart_h - wifi_hist[(wifi_hist_pos - si - 2 + WIFI_HIST_SIZE) % WIFI_HIST_SIZE] * chart_h / 100;
+                    int y1 = chart_y + chart_h - wifi_hist[(wifi_hist_pos - si - 1 + WIFI_HIST_SIZE) % WIFI_HIST_SIZE] * (chart_h - 1) / 100;
+                    int y2 = chart_y + chart_h - wifi_hist[(wifi_hist_pos - si - 2 + WIFI_HIST_SIZE) % WIFI_HIST_SIZE] * (chart_h - 1) / 100;
                     lineRGBA(r, x1, y1, x2, y2, color_cyan.r, color_cyan.g, color_cyan.b, 200);
                 }
+                draw_text(r, font_xs, "60s", chart_x, chart_y + chart_h + 2, color_grey, 0);
+                draw_text(r, font_xs, "now", chart_x + chart_w, chart_y + chart_h + 2, color_grey, 2);
             }
         } else {
             draw_text(r, font_sm, s_wifi_not_active[cur_lang], 690, 540 - sc, color_grey, 0);
@@ -5698,11 +6652,11 @@ static void draw_pg2(SDL_Renderer *r) {
     }
 
     // USB Ethernet diagnostics
-    draw_card(r, 40, 720 - sc, 1200, 140, "USB Ethernet Adapter");
+    draw_card(r, 40, 750 - sc, 1200, 140, "USB Ethernet Adapter");
     NifmInternetConnectionType eth_ct; u32 eth_ws=0; NifmInternetConnectionStatus eth_cs;
     if (R_SUCCEEDED(nifmGetInternetConnectionStatus(&eth_ct,&eth_ws,&eth_cs)) && eth_ct == 2 && eth_cs == 4) {
-        draw_text(r, font_sm, "USB Ethernet adapter connected", 70, 775 - sc, color_green, 0);
-        draw_text(r, font_sm, "Stable wired connection - ideal for online gaming & file transfer", 70, 805 - sc, color_grey, 0);
+        draw_text(r, font_sm, "USB Ethernet adapter connected", 70, 805 - sc, color_green, 0);
+        draw_text(r, font_sm, "Stable wired connection - ideal for online gaming & file transfer", 70, 835 - sc, color_grey, 0);
         // MAC address via ifreq
         int eth_s = socket(AF_INET, SOCK_DGRAM, 0);
         if (eth_s >= 0) {
@@ -5710,13 +6664,79 @@ static void draw_pg2(SDL_Renderer *r) {
             strncpy(eth_ifr.ifr_name, "eth0", sizeof(eth_ifr.ifr_name)-1);
             if (ioctl(eth_s, SIOCGIFINDEX, &eth_ifr) == 0) {
                 // Try to read MAC from sysfs or use placeholder
-                draw_text(r, font_sm, "USB Ethernet active", 70, 832 - sc, color_cyan, 0);
+                draw_text(r, font_sm, "USB Ethernet active", 70, 862 - sc, color_cyan, 0);
             }
             close(eth_s);
         }
     } else {
-        draw_text(r, font_sm, "No USB Ethernet adapter detected", 70, 775 - sc, color_grey, 0);
-        draw_text(r, font_sm, "Connect a compatible USB Ethernet adapter via the dock", 70, 805 - sc, color_grey, 0);
+        draw_text(r, font_sm, "No USB Ethernet adapter detected", 70, 805 - sc, color_grey, 0);
+        draw_text(r, font_sm, "Connect a compatible USB Ethernet adapter via the dock", 70, 835 - sc, color_grey, 0);
+    }
+
+    draw_card(r, 40, 920 - sc, 1200, 190, s_traffic_title[cur_lang]);
+    if (network_traffic_available) {
+        char rx_text[48], tx_text[48], rx_total_text[48], tx_total_text[48];
+        format_bytes(network_traffic_rx_rate, rx_text, sizeof(rx_text));
+        format_bytes(network_traffic_tx_rate, tx_text, sizeof(tx_text));
+        format_bytes(network_traffic_rx_session, rx_total_text, sizeof(rx_total_text));
+        format_bytes(network_traffic_tx_session, tx_total_text, sizeof(tx_total_text));
+        char rate_text[64];
+        snprintf(rate_text, sizeof(rate_text), "%s/s", rx_text);
+        draw_key_value(r, s_traffic_rx[cur_lang], rate_text, 70, 970 - sc, color_cyan);
+        snprintf(rate_text, sizeof(rate_text), "%s/s", tx_text);
+        draw_key_value(r, s_traffic_tx[cur_lang], rate_text, 70, 1000 - sc, color_orange);
+        draw_key_value(r, s_traffic_received_total[cur_lang], rx_total_text,
+            70, 1030 - sc, color_cyan);
+        draw_key_value(r, s_traffic_sent_total[cur_lang], tx_total_text,
+            70, 1060 - sc, color_orange);
+
+        int graph_x = 360, graph_y = 970 - sc, graph_w = 830, graph_h = 78;
+        draw_rounded_rect(r, graph_x, graph_y, graph_w, graph_h, 5, color_dark_grey);
+        lineRGBA(r, graph_x, graph_y + graph_h - 1, graph_x + graph_w - 1,
+            graph_y + graph_h - 1, 120, 120, 120, 90);
+        u64 max_rate = 0;
+        for (int i = 0; i < network_traffic_count; i++) {
+            int idx = (network_traffic_pos - network_traffic_count + i +
+                NETWORK_TRAFFIC_HISTORY) % NETWORK_TRAFFIC_HISTORY;
+            if (network_traffic_history[idx].received > max_rate)
+                max_rate = network_traffic_history[idx].received;
+            if (network_traffic_history[idx].sent > max_rate)
+                max_rate = network_traffic_history[idx].sent;
+        }
+        if (max_rate == 0) max_rate = 1;
+        int prev_rx_x = 0, prev_rx_y = 0, prev_tx_x = 0, prev_tx_y = 0;
+        for (int i = 0; i < network_traffic_count; i++) {
+            int idx = (network_traffic_pos - network_traffic_count + i +
+                NETWORK_TRAFFIC_HISTORY) % NETWORK_TRAFFIC_HISTORY;
+            int px = graph_x + (network_traffic_count > 1 ?
+                i * (graph_w - 1) / (network_traffic_count - 1) : graph_w - 1);
+            int rx_y = graph_y + graph_h - 2 -
+                (int)(network_traffic_history[idx].received * (graph_h - 4) / max_rate);
+            int tx_y = graph_y + graph_h - 2 -
+                (int)(network_traffic_history[idx].sent * (graph_h - 4) / max_rate);
+            if (i > 0) {
+                thickLineRGBA(r, prev_rx_x, prev_rx_y, px, rx_y, 2,
+                    color_cyan.r, color_cyan.g, color_cyan.b, 230);
+                thickLineRGBA(r, prev_tx_x, prev_tx_y, px, tx_y, 2,
+                    color_orange.r, color_orange.g, color_orange.b, 230);
+            }
+            prev_rx_x = px;
+            prev_rx_y = rx_y;
+            prev_tx_x = px;
+            prev_tx_y = tx_y;
+        }
+        draw_text(r, font_xs, "60s", graph_x, graph_y + graph_h + 2, color_grey, 0);
+        draw_text(r, font_xs, "now", graph_x + graph_w, graph_y + graph_h + 2,
+            color_grey, 2);
+    } else {
+        char error_text[160];
+        snprintf(error_text, sizeof(error_text),
+            "%s (route %d, routeL %d, ioctl %d)",
+            s_traffic_unavailable[cur_lang],
+            network_traffic_errors.route_list_error,
+            network_traffic_errors.route_list_long_error,
+            network_traffic_errors.ioctl_error);
+        draw_text_w(r, font_sm, error_text, 70, 980 - sc, color_grey, 0, 1100);
     }
 
     SDL_RenderSetClipRect(r, NULL);
@@ -5776,6 +6796,12 @@ static void draw_pg3(SDL_Renderer *r) {
             snprintf(t, sizeof(t), "%s: %s  %s / %s (%d%%)  %s/s",
                 ftp_xfer_is_upload ? s_ftp_uploading[cur_lang] : s_ftp_downloading[cur_lang],
                 ftp_xfer_name, done_text, total_text, (int)(ratio * 100.0), speed_text);
+            if (done > 0 && done < total && elapsed > 0.1) {
+                char eta[32];
+                format_duration((u64)((double)(total - done) * elapsed / (double)done), eta, sizeof(eta));
+                snprintf(t, sizeof(t), s_transfer_eta[cur_lang], eta);
+                draw_text_w(r, font_xs, t, 70, 371, color_cyan, 0, 500);
+            }
         } else {
             // STOR normally has no size in FTP's control commands. Show a
             // moving activity segment plus the exact number of bytes handled.
@@ -5840,6 +6866,16 @@ static void draw_pg3(SDL_Renderer *r) {
         snprintf(t, sizeof(t), "%s  %.1f/%.1f %s (%d%%)", (const char*)mtp_xfer_filename,
             ddone, dtotal, unit, (int)(pct * 100));
         draw_text(r, font_xs, t, 690, 400, color_white, 0);
+        u64 tick = armGetSystemTick();
+        u64 freq = armGetSystemTickFreq();
+        double elapsed = (freq && tick > mtp_xfer_start_tick)
+            ? (double)(tick - mtp_xfer_start_tick) / (double)freq : 0.0;
+        if (total > done && done > 0 && elapsed > 0.1) {
+            char eta[32];
+            format_duration((u64)((double)(total - done) * elapsed / (double)done), eta, sizeof(eta));
+            snprintf(t, sizeof(t), s_transfer_eta[cur_lang], eta);
+            draw_text_w(r, font_xs, t, 690, 420, color_cyan, 0, 480);
+        }
     } else {
         mtp_xfer_start_tick = 0;
     }
@@ -5904,7 +6940,7 @@ static void draw_pg4(SDL_Renderer *r) {
 
     int view_top = 140, view_bottom = 650;
     int view_h = view_bottom - view_top;
-    int content_bottom = 970;
+    int content_bottom = 835;
     int content_h = content_bottom - view_top;
     perf_scroll_max = content_h > view_h ? content_h - view_h : 0;
     if (perf_scroll > perf_scroll_max) perf_scroll = perf_scroll_max;
@@ -5918,6 +6954,7 @@ static void draw_pg4(SDL_Renderer *r) {
     ClkrstSession cc, cg, cm;
     u32 cpu=0, gpu=0, mem=0;
     s32 skin = 0;
+    bool skin_ok = false;
     bool clk_ok = false;
     if (R_SUCCEEDED(clkrstOpenSession(&cc,(PcvModuleId)PcvModule_CpuBus,3)) &&
         R_SUCCEEDED(clkrstOpenSession(&cg,(PcvModuleId)PcvModule_GPU,3)) &&
@@ -5931,7 +6968,7 @@ static void draw_pg4(SDL_Renderer *r) {
         clkrstCloseSession(&cm);
     }
     if (R_SUCCEEDED(tcInitialize())) {
-        tcGetSkinTemperatureMilliC(&skin);
+        skin_ok = R_SUCCEEDED(tcGetSkinTemperatureMilliC(&skin));
         tcExit();
     }
     soc_temp_update();
@@ -5939,32 +6976,34 @@ static void draw_pg4(SDL_Renderer *r) {
     u32 cpu_mhz = cpu/1000000, gpu_mhz = gpu/1000000, mem_mhz = mem/1000000;
 
     // Update history buffers
-    {
+    u64 now = armGetSystemTick();
+    bool sample_history = !perf_hist_last_tick || now - perf_hist_last_tick >= armGetSystemTickFreq();
+    if (sample_history) {
+        perf_hist_last_tick = now;
+
         int cpu_pct = clk_ok ? (int)((float)cpu_mhz / 1785.0f * 100.0f) : 0;
         if (cpu_pct < 0) cpu_pct = 0;
         if (cpu_pct > 100) cpu_pct = 100;
         cpu_hist[cpu_hist_pos] = cpu_pct;
         cpu_hist_pos = (cpu_hist_pos + 1) % PERF_HIST_SIZE;
         if (cpu_hist_count < PERF_HIST_SIZE) cpu_hist_count++;
+
+        if (skin_ok) {
+            u32 tpct = skin < 25000 ? 0 : (skin > 70000 ? 100 : (skin - 25000) * 100 / 45000);
+            temp_hist[temp_hist_pos] = (int)tpct;
+            temp_hist_pos = (temp_hist_pos + 1) % PERF_HIST_SIZE;
+            if (temp_hist_count < PERF_HIST_SIZE) temp_hist_count++;
+        }
+        fps_hist[fps_hist_pos] = current_fps;
+        fps_hist_pos = (fps_hist_pos + 1) % FPS_HIST_SIZE;
+        if (fps_hist_count < FPS_HIST_SIZE) fps_hist_count++;
     }
-    {
-        u32 tpct = 0;
-        if (skin < 25000) tpct = 0;
-        else if (skin > 70000) tpct = 100;
-        else tpct = (skin - 25000) * 100 / 45000;
-        temp_hist[temp_hist_pos] = (int)tpct;
-        temp_hist_pos = (temp_hist_pos + 1) % PERF_HIST_SIZE;
-        if (temp_hist_count < PERF_HIST_SIZE) temp_hist_count++;
-    }
-    fps_hist[fps_hist_pos] = current_fps;
-    fps_hist_pos = (fps_hist_pos + 1) % FPS_HIST_SIZE;
-    if (fps_hist_count < FPS_HIST_SIZE) fps_hist_count++;
 
     u64 mem_total = 0, mem_used = 0;
     bool mem_ok = R_SUCCEEDED(svcGetInfo(&mem_total, InfoType_TotalMemorySize, CUR_PROCESS_HANDLE, 0)) &&
                   R_SUCCEEDED(svcGetInfo(&mem_used, InfoType_UsedMemorySize, CUR_PROCESS_HANDLE, 0));
     float mem_pct_f = mem_ok && mem_total > 0 ? (float)mem_used / mem_total : 0;
-    {
+    if (sample_history) {
         int mem_pct = (int)(mem_pct_f * 100.0f);
         if (mem_pct < 0) mem_pct = 0;
         if (mem_pct > 100) mem_pct = 100;
@@ -5973,8 +7012,10 @@ static void draw_pg4(SDL_Renderer *r) {
         if (mem_hist_count < PERF_HIST_SIZE) mem_hist_count++;
     }
     // Alerts
-    if (skin >= temp_alert_millic) { if (!temp_alert_notified) { add_alert("ALERT: High Temp!"); temp_alert_notified = true; } }
-    else if (skin < temp_alert_millic - 5000) { temp_alert_notified = false; }
+    if (skin_ok) {
+        if (skin >= temp_alert_millic) { if (!temp_alert_notified) { add_alert("ALERT: High Temp!"); temp_alert_notified = true; } }
+        else if (skin < temp_alert_millic - 5000) { temp_alert_notified = false; }
+    }
     if (mem_pct_f > mem_alert_frac) { if (!mem_alert_notified) { add_alert("ALERT: High Mem Usage!"); mem_alert_notified = true; } }
     else if (mem_pct_f < mem_alert_frac - 0.05f) { mem_alert_notified = false; }
 
@@ -6009,46 +7050,64 @@ static void draw_pg4(SDL_Renderer *r) {
     // ROW 2: FPS line chart + load indicators
     // ═══════════════════════════════════════════════════════
     int chart_y = 270;
-    int chart_h = 175;
+    int chart_h = 205;
+    SDL_Color fps_color = current_fps >= 55 ? color_green : (current_fps >= 30 ? color_yellow : color_red);
 
     // ── FPS History (connected line + fill) ──
     draw_card(r, 40, chart_y - sc, 780, chart_h, s_fps_history[cur_lang]);
     int hc = fps_hist_count > 60 ? 60 : fps_hist_count;
-    int fps_cx = 70, fps_cy = chart_y + 28 - sc, fps_cw = 720, fps_ch = 90;
-    draw_rounded_rect(r, fps_cx, fps_cy, fps_cw, fps_ch, 3, color_dark_grey);
+    int fps_cx = 105, fps_cy = chart_y + 58 - sc, fps_cw = 675, fps_ch = 80;
+    draw_rounded_rect(r, fps_cx, fps_cy, fps_cw, fps_ch, 4, color_dark_grey);
 
-    for (int g = 0; g <= 3; g++) {
-        int gy = fps_cy + (fps_ch * g / 3);
-        lineRGBA(r, fps_cx, gy, fps_cx + fps_cw, gy, 100, 100, 100, 50);
+    for (int g = 0; g <= 4; g++) {
+        int gx = fps_cx + (fps_cw - 1) * g / 4;
+        int gy = fps_cy + (fps_ch - 1) * g / 2;
+        lineRGBA(r, gx, fps_cy, gx, fps_cy + fps_ch - 1, 100, 100, 100, 45);
+        if (g <= 2)
+            lineRGBA(r, fps_cx, gy, fps_cx + fps_cw - 1, gy, 100, 100, 100, 65);
     }
-    int ref30y = fps_cy + fps_ch * 30 / 60;
-    lineRGBA(r, fps_cx, ref30y, fps_cx + fps_cw, ref30y, 255, 100, 100, 120);
-    draw_text(r, font_xs, "30", fps_cx + 3, ref30y - 8, color_red, 0);
+    draw_text(r, font_xs, "60", 72, fps_cy - 6, color_grey, 0);
+    draw_text(r, font_xs, "30", 72, fps_cy + fps_ch / 2 - 7, color_yellow, 0);
+    draw_text(r, font_xs, "0", 79, fps_cy + fps_ch - 13, color_grey, 0);
+    int ref30y = fps_cy + fps_ch / 2;
+    lineRGBA(r, fps_cx, ref30y, fps_cx + fps_cw - 1, ref30y, 255, 180, 70, 120);
 
-    if (hc >= 2) {
+    if (hc > 0) {
         Sint16 xpts[FPS_HIST_SIZE+2], ypts[FPS_HIST_SIZE+2];
         int npts = hc;
         for (int i = 0; i < npts; i++) {
             int fv = fps_hist[(fps_hist_pos - npts + i + FPS_HIST_SIZE) % FPS_HIST_SIZE];
             if (fv > 60) fv = 60;
             if (fv < 0) fv = 0;
-            xpts[i] = fps_cx + i * fps_cw / npts;
-            ypts[i] = fps_cy + fps_ch - (fv * fps_ch / 60);
+            xpts[i] = fps_cx + fps_cw - 1 - (npts - 1 - i) * (fps_cw - 1) / (FPS_HIST_SIZE - 1);
+            ypts[i] = fps_cy + fps_ch - 1 - (fv * (fps_ch - 1) / 60);
         }
-        Sint16 fx[FPS_HIST_SIZE+4], fy[FPS_HIST_SIZE+4];
-        for (int i = 0; i < npts; i++) { fx[i] = xpts[i]; fy[i] = ypts[i]; }
-        fx[npts] = xpts[npts-1]; fy[npts] = fps_cy + fps_ch;
-        fx[npts+1] = xpts[0]; fy[npts+1] = fps_cy + fps_ch;
-        filledPolygonRGBA(r, fx, fy, npts+2, 0, 210, 255, 40);
+        if (npts >= 2) {
+            Sint16 fx[FPS_HIST_SIZE+4], fy[FPS_HIST_SIZE+4];
+            for (int i = 0; i < npts; i++) { fx[i] = xpts[i]; fy[i] = ypts[i]; }
+            fx[npts] = xpts[npts-1]; fy[npts] = fps_cy + fps_ch - 1;
+            fx[npts+1] = xpts[0]; fy[npts+1] = fps_cy + fps_ch - 1;
+            filledPolygonRGBA(r, fx, fy, npts+2, 0, 210, 255, 40);
+        }
         for (int i = 0; i < npts - 1; i++) {
             int fv1 = fps_hist[(fps_hist_pos - npts + i + FPS_HIST_SIZE) % FPS_HIST_SIZE];
             int fv2 = fps_hist[(fps_hist_pos - npts + i + 1 + FPS_HIST_SIZE) % FPS_HIST_SIZE];
             SDL_Color lc = (fv1 >= 55 && fv2 >= 55) ? color_green : ((fv1 >= 30 || fv2 >= 30) ? color_yellow : color_red);
             thickLineRGBA(r, xpts[i], ypts[i], xpts[i+1], ypts[i+1], 3, lc.r, lc.g, lc.b, 220);
         }
+        filledCircleRGBA(r, xpts[npts-1], ypts[npts-1], 4, color_white.r, color_white.g, color_white.b, 255);
+        filledCircleRGBA(r, xpts[npts-1], ypts[npts-1], 2, fps_color.r, fps_color.g, fps_color.b, 255);
     }
     snprintf(t, sizeof(t), s_current_fps_fmt[cur_lang], current_fps);
-    draw_text(r, font_md, t, 70, chart_y + chart_h - 45 - sc, current_fps >= 55 ? color_green : color_yellow, 0);
+    draw_text(r, font_md, t, 70, chart_y + 151 - sc, fps_color, 0);
+    int fps_min, fps_avg, fps_max;
+    if (history_stats(fps_hist, fps_hist_count, fps_hist_pos, FPS_HIST_SIZE,
+        &fps_min, &fps_avg, &fps_max)) {
+        snprintf(t, sizeof(t), s_history_stats_fmt[cur_lang], fps_min, fps_avg, fps_max);
+        draw_text_w(r, font_xs, t, 800, chart_y + 151 - sc, color_grey, 2, 300);
+    }
+    draw_text(r, font_xs, "60s", fps_cx, chart_y + 178 - sc, color_grey, 0);
+    draw_text(r, font_xs, "now", fps_cx + fps_cw - 28, chart_y + 178 - sc, color_grey, 0);
 
     // ── Load indicators (right) ──
     draw_card(r, 840, chart_y - sc, 400, chart_h, s_system_load[cur_lang]);
@@ -6100,7 +7159,7 @@ static void draw_pg4(SDL_Renderer *r) {
     // ═══════════════════════════════════════════════════════
     // ROW 3: System Health (3 columns, lowered thermal text)
     // ═══════════════════════════════════════════════════════
-    int row3_y = 460 - sc;
+    int row3_y = 490 - sc;
     int r3w = 385;
     int r3h = 165;
 
@@ -6158,50 +7217,72 @@ static void draw_pg4(SDL_Renderer *r) {
 
     // ── Row 4: Temperature History Graph ──
     int temp_graph_y = row3_y + r3h + 20;
-    draw_card(r, 40, temp_graph_y, 1200, 160, "Skin Temperature History (60s)");
-    int graph_lx = 70, graph_rx = 1210;
+    draw_card(r, 40, temp_graph_y, 1200, 160, s_skin_history[cur_lang]);
+    int graph_lx = 120, graph_rx = 1210;
     int graph_w = graph_rx - graph_lx;
-    int graph_by = temp_graph_y + 125;
-    int graph_h = 110;
-    // Draw grid lines
-    SDL_SetRenderDrawColor(r, color_dark_grey.r, color_dark_grey.g, color_dark_grey.b, 120);
-    for (int gi = 0; gi < 4; gi++) {
-        int gy = graph_by - gi * graph_h / 3;
-        SDL_RenderDrawLine(r, graph_lx, gy, graph_rx, gy);
+    int graph_top = temp_graph_y + 59;
+    int graph_h = 61;
+    int graph_by = graph_top + graph_h - 1;
+    draw_rounded_rect(r, graph_lx, graph_top, graph_w, graph_h, 4, color_dark_grey);
+    for (int gi = 0; gi <= 2; gi++) {
+        int gy = graph_top + gi * (graph_h - 1) / 2;
+        int gx = graph_lx + gi * (graph_w - 1) / 2;
+        lineRGBA(r, graph_lx, gy, graph_rx - 1, gy, 100, 100, 100, 65);
+        lineRGBA(r, gx, graph_top, gx, graph_by, 100, 100, 100, 45);
     }
-    // Draw the line graph
-    if (temp_hist_count > 1) {
-        int step = graph_w / PERF_HIST_SIZE;
-        if (step < 1) step = 1;
+    if (temp_alert_millic >= 25000 && temp_alert_millic <= 70000) {
+        int alert_pct = (temp_alert_millic - 25000) * 100 / 45000;
+        int alert_y = graph_by - alert_pct * (graph_h - 1) / 100;
+        lineRGBA(r, graph_lx, alert_y, graph_rx - 1, alert_y, color_red.r, color_red.g, color_red.b, 150);
+    }
+    if (temp_hist_count > 0) {
         int start = temp_hist_count < PERF_HIST_SIZE ? 0 : temp_hist_pos;
-        int prev_x = -1, prev_y = -1;
+        Sint16 xpts[PERF_HIST_SIZE], ypts[PERF_HIST_SIZE];
         for (int gi = 0; gi < temp_hist_count; gi++) {
             int idx = (start + gi) % PERF_HIST_SIZE;
             int val = temp_hist[idx];
-            int x = graph_lx + gi * step;
-            int y = graph_by - val * graph_h / 100;
-            if (val >= 80) SDL_SetRenderDrawColor(r, 255, 60, 60, 220);
-            else if (val >= 50) SDL_SetRenderDrawColor(r, 255, 200, 60, 220);
-            else SDL_SetRenderDrawColor(r, color_cyan.r, color_cyan.g, color_cyan.b, 220);
-            if (prev_x >= 0) SDL_RenderDrawLine(r, prev_x, prev_y, x, y);
-            SDL_RenderDrawPoint(r, x, y);
-            prev_x = x; prev_y = y;
+            xpts[gi] = graph_lx + graph_w - 1 - (temp_hist_count - 1 - gi) * (graph_w - 1) / (PERF_HIST_SIZE - 1);
+            ypts[gi] = graph_by - val * (graph_h - 1) / 100;
         }
+        if (temp_hist_count >= 2) {
+            Sint16 fill_x[PERF_HIST_SIZE+2], fill_y[PERF_HIST_SIZE+2];
+            for (int gi = 0; gi < temp_hist_count; gi++) {
+                fill_x[gi] = xpts[gi];
+                fill_y[gi] = ypts[gi];
+            }
+            fill_x[temp_hist_count] = xpts[temp_hist_count - 1];
+            fill_y[temp_hist_count] = graph_by;
+            fill_x[temp_hist_count + 1] = xpts[0];
+            fill_y[temp_hist_count + 1] = graph_by;
+            filledPolygonRGBA(r, fill_x, fill_y, temp_hist_count + 2, color_cyan.r, color_cyan.g, color_cyan.b, 38);
+        }
+        for (int gi = 1; gi < temp_hist_count; gi++) {
+            int val = temp_hist[(start + gi) % PERF_HIST_SIZE];
+            int x = xpts[gi], y = ypts[gi];
+            SDL_Color line_color = val >= 80 ? color_red : (val >= 50 ? color_yellow : color_cyan);
+            int prev_val = temp_hist[(start + gi - 1) % PERF_HIST_SIZE];
+            SDL_Color prev_color = prev_val >= 80 ? color_red : (prev_val >= 50 ? color_yellow : color_cyan);
+            thickLineRGBA(r, xpts[gi - 1], ypts[gi - 1], x, y, 3,
+                line_color.r, line_color.g, line_color.b, 230);
+            pixelRGBA(r, x, y, prev_color.r, prev_color.g, prev_color.b, 255);
+        }
+        int last = temp_hist[(start + temp_hist_count - 1) % PERF_HIST_SIZE];
+        SDL_Color latest_color = last >= 80 ? color_red : (last >= 50 ? color_yellow : color_cyan);
+        filledCircleRGBA(r, xpts[temp_hist_count - 1], ypts[temp_hist_count - 1], 5,
+            color_white.r, color_white.g, color_white.b, 255);
+        filledCircleRGBA(r, xpts[temp_hist_count - 1], ypts[temp_hist_count - 1], 3,
+            latest_color.r, latest_color.g, latest_color.b, 255);
     } else {
-        draw_text(r, font_sm, "Collecting data...", 640, temp_graph_y + 70, color_grey, 1);
+        draw_text(r, font_sm, "Collecting data...", (graph_lx + graph_rx) / 2, graph_top + 20, color_grey, 1);
     }
-    // Labels
-    draw_text(r, font_xs, "0%", graph_lx, graph_by + 4, color_grey, 0);
-    draw_text(r, font_xs, "50%", graph_lx, graph_by - graph_h*50/100 + 4, color_grey, 0);
-    draw_text(r, font_xs, "100%", graph_lx, graph_by - graph_h + 4, color_grey, 0);
-
-    // Large capture panel with a compact button-sized touch target.
-    draw_card(r, 40, 810 - sc, 1200, 140, s_screenshot_title[cur_lang]);
-    draw_text_w(r, font_sm, s_screenshot_desc[cur_lang], 70, 870 - sc, color_grey, 0, 780);
-    draw_rounded_box(r, 930, 858 - sc, 250, 48, 8, color_card_border);
-    draw_rounded_rect(r, 930, 858 - sc, 250, 48, 8, color_purple);
-    draw_text_w(r, font_sm, s_screenshot_btn[cur_lang], 1055, 871 - sc, color_white, 1, 234);
-
+    draw_text(r, font_xs, "70 C", 70, graph_top - 5, color_grey, 0);
+    draw_text(r, font_xs, "48 C", 70, graph_top + graph_h / 2 - 7, color_grey, 0);
+    draw_text(r, font_xs, "25 C", 70, graph_by - 13, color_grey, 0);
+    draw_text(r, font_xs, "60s", graph_lx, temp_graph_y + 132, color_grey, 0);
+    draw_text(r, font_xs, "30s", graph_lx + graph_w / 2 - 10, temp_graph_y + 132, color_grey, 0);
+    draw_text(r, font_xs, "now", graph_rx - 28, temp_graph_y + 132, color_grey, 0);
+    if (skin_ok)
+        draw_temperature(r, font_sm, skin, 1210, temp_graph_y + 15, get_temp_color(skin), 2);
     SDL_RenderSetClipRect(r, NULL);
 
     draw_modern_scrollbar(r, view_top, view_bottom, perf_scroll, perf_scroll_max);
@@ -6293,8 +7374,10 @@ static void draw_pg5(SDL_Renderer *r, PadState *pad) {
     draw_btn(r, "ZR", 350, trig_y + 8, held & HidNpadButton_ZR);
 
     // Deadzone visualizer & drift detector
-    circleRGBA(r, scx, scy, 7, color_card_border.r, color_card_border.g, color_card_border.b, 160);
-    circleRGBA(r, rscx, rscy, 7, color_card_border.r, color_card_border.g, color_card_border.b, 160);
+    circleRGBA(r, scx, scy, 20, color_cyan.r, color_cyan.g, color_cyan.b, 100);
+    circleRGBA(r, rscx, rscy, 20, color_cyan.r, color_cyan.g, color_cyan.b, 100);
+    circleRGBA(r, scx, scy, 3, color_white.r, color_white.g, color_white.b, 190);
+    circleRGBA(r, rscx, rscy, 3, color_white.r, color_white.g, color_white.b, 190);
 
     float mag_l = sqrtf((float)stick_l.x * (float)stick_l.x + (float)stick_l.y * (float)stick_l.y) / 32768.f * 100.f;
     float mag_r = sqrtf((float)stick_r.x * (float)stick_r.x + (float)stick_r.y * (float)stick_r.y) / 32768.f * 100.f;
@@ -6314,6 +7397,7 @@ static void draw_pg5(SDL_Renderer *r, PadState *pad) {
         snprintf(t, sizeof(t), "R: X=%d Y=%d [Centered]", stick_r.x, stick_r.y);
         draw_text(r, font_sm, t, 850, trig_y, color_green, 0);
     }
+    draw_text_w(r, font_xs, s_stick_test_hint[cur_lang], 640, 634 - sc, color_grey, 1, 500);
 
     // Joy-Con battery levels (positioned to avoid overlap)
     HidPowerInfo jc_left = {0}, jc_right = {0};
@@ -6397,6 +7481,7 @@ static void draw_pg6(SDL_Renderer *r) {
     int sc = tools_scroll;
 
     draw_card(r, 40, 140 - sc, 1200, 190, s_br_ctrl[cur_lang]);
+    draw_rounded_box(r, 40, 148 - sc, 5, 174, 2, color_yellow);
     float br = 0;
     if (R_SUCCEEDED(brightness_read(&br))) {
         if (ctrl_brightness < 0) ctrl_brightness = br;
@@ -6415,13 +7500,17 @@ static void draw_pg6(SDL_Renderer *r) {
             lblIsAutoBrightnessControlEnabled(&auto_br_enabled);
             lblExit();
         }
-        draw_text(r, font_sm, auto_br_enabled ? s_auto_on_off[cur_lang] : s_auto_off_on[cur_lang], 600, 260 - sc, auto_br_enabled ? color_green : color_grey, 0);
         draw_text(r, font_sm, s_br_adjust[cur_lang], 70, 275 - sc, color_grey, 0);
+        draw_rounded_box(r, 930, 274 - sc, 280, 38, 7,
+            auto_br_enabled ? color_green : color_card_border);
+        draw_text_w(r, font_sm, auto_br_enabled ? s_auto_on_off[cur_lang] :
+            s_auto_off_on[cur_lang], 1070, 284 - sc, color_white, 1, 260);
     } else {
         draw_text(r, font_sm, s_br_na[cur_lang], 70, 200 - sc, color_grey, 0);
     }
 
     draw_card(r, 40, 370 - sc, 580, 200, s_haptic_test[cur_lang]);
+    draw_rounded_box(r, 40, 378 - sc, 5, 184, 2, color_purple);
     draw_text(r, font_sm, s_test_haptic[cur_lang], 70, 430 - sc, color_grey, 0);
     draw_rounded_box(r, 70, 460 - sc, 220, 40, 6, color_card_border);
     draw_text_w(r, font_sm, s_left_rumble[cur_lang], 180, 470 - sc, color_cyan, 1, 204);
@@ -6429,6 +7518,7 @@ static void draw_pg6(SDL_Renderer *r) {
     draw_text_w(r, font_sm, s_right_rumble[cur_lang], 420, 470 - sc, color_cyan, 1, 204);
 
     draw_card(r, 660, 370 - sc, 580, 200, s_report_export[cur_lang]);
+    draw_rounded_box(r, 660, 378 - sc, 5, 184, 2, color_orange);
     draw_text(r, font_sm, s_export_desc[cur_lang], 690, 430 - sc, color_grey, 0);
     draw_rounded_box(r, 690, 460 - sc, 240, 40, 6, color_card_border);
     draw_text_w(r, font_sm, s_export_btn[cur_lang], 810, 470 - sc, color_orange, 1, 224);
@@ -6445,6 +7535,7 @@ static void draw_pg6(SDL_Renderer *r) {
     }
 
     draw_card(r, 40, 610 - sc, 1200, 160, s_runtime_env[cur_lang]);
+    draw_rounded_box(r, 40, 618 - sc, 5, 144, 2, color_green);
     draw_key_value(r, s_app_status[cur_lang], s_running_ok[cur_lang], 70, 665 - sc, color_green);
     draw_key_value(r, s_render[cur_lang], "SDL2 @ 60 FPS", 650, 665 - sc, color_white);
     int dock = appletGetOperationMode();
@@ -6455,13 +7546,15 @@ static void draw_pg6(SDL_Renderer *r) {
     draw_text_w(r, font_sm, s_dead_pixel[cur_lang], 180, 731 - sc, color_red, 1, 204);
 
     {
-        int fs_cx = 40, fs_cy = 790 - sc, fs_cw = 580, fs_ch = 220;
+        int fs_cx = 40, fs_cy = 790 - sc, fs_cw = 580, fs_ch = 180;
         draw_card(r, fs_cx, fs_cy, fs_cw, fs_ch, s_fan_ctrl[cur_lang]);
+        draw_rounded_box(r, fs_cx, fs_cy + 8, 5, fs_ch - 16, 2, color_orange);
         draw_text_w(r, font_sm, s_fan_dev[cur_lang], 70, fs_cy + 58, color_yellow, 0, 520);
         draw_text_w(r, font_xs, s_fan_req[cur_lang], 70, fs_cy + 92, color_grey, 0, 520);
     }
 
     draw_card(r, 660, 790 - sc, 580, 180, s_app_mode[cur_lang]);
+    draw_rounded_box(r, 660, 798 - sc, 5, 164, 2, color_cyan);
     {
         int mod_y = 850 - sc;
         int cur_mode = app_mode;
@@ -6470,15 +7563,24 @@ static void draw_pg6(SDL_Renderer *r) {
             SDL_Color mod_col = (i == cur_mode) ? color_cyan : color_grey;
             SDL_Color mod_bg = (i == cur_mode) ? color_dark_grey : color_card_border;
             draw_rounded_box(r, bx, mod_y, 170, 30, 6, mod_bg);
-            draw_text(r, font_sm, s_modes[cur_lang][i], bx + 85, mod_y + 4, mod_col, 1);
+            draw_text_w(r, font_sm, s_modes[cur_lang][i], bx + 85, mod_y + 4,
+                mod_col, 1, 154);
         }
         draw_text_w(r, font_xs, s_mode_switch[cur_lang], 690, mod_y + 40, color_grey, 0, 530);
-        draw_text_w(r, font_xs, s_overlay_desc[cur_lang], 690, mod_y + 65, color_grey, 0, 530);
+        if (overlay_status == OVERLAY_STATUS_UNKNOWN)
+            overlay_status = detect_ultrahand_overlay();
+        draw_text_w(r, font_xs, overlay_status_text(overlay_status), 690,
+            mod_y + 65, overlay_status == OVERLAY_STATUS_DETECTED ?
+            color_green : color_yellow, 0, 530);
         draw_text_w(r, font_xs, s_sysmodule_desc[cur_lang], 690, mod_y + 88, color_grey, 0, 530);
     }
+    draw_rounded_box(r, 690, 974 - sc, 520, 32, 7, color_dark_grey);
+    draw_rounded_rect(r, 690, 974 - sc, 520, 32, 7, color_cyan);
+    draw_text_w(r, font_sm, s_tesla_guide_button[cur_lang], 950, 980 - sc, color_cyan, 1, 500);
 
     // CPU/GPU Frequency Scaling card (left)
     draw_card(r, 40, 1010 - sc, 580, 200, s_scale_title[cur_lang]);
+    draw_rounded_box(r, 40, 1018 - sc, 5, 184, 2, color_yellow);
     {
         u32 cur_cpu=0, cur_gpu=0, cur_mem=0;
         ClkrstSession cc, cg, cm;
@@ -6523,12 +7625,6 @@ static void draw_pg6(SDL_Renderer *r) {
             draw_text(r, font_sm, "Scaling not available", 70, 1080 - sc, color_red, 0);
         }
     }
-
-    // Screenshot capture button
-    draw_card(r, 660, 1010 - sc, 580, 140, s_screenshot_title[cur_lang]);
-    draw_text(r, font_sm, "Capture current screen to SD card:", 690, 1060 - sc, color_grey, 0);
-    draw_rounded_box(r, 690, 1080 - sc, 240, 40, 6, color_card_border);
-    draw_text_w(r, font_sm, s_screenshot_btn[cur_lang], 810, 1090 - sc, color_purple, 1, 224);
 
     // Installed Games card
     if (installed_games_scanned) {
@@ -6663,27 +7759,54 @@ static void draw_pg6(SDL_Renderer *r) {
     // User save data: enumerate account saves, identify them by title ID and
     // keep reversible dated snapshots on the SD card.
     if (!save_manager_loaded) {
-        save_manager_refresh();
+        Result rc = save_manager_refresh();
+        if (R_FAILED(rc)) {
+            snprintf(popup_text, sizeof(popup_text), "Save list unavailable: %08X", (unsigned)rc);
+            popup_type = POPUP_INFO;
+            popup_active = true;
+            popup_start_tick = armGetSystemTick();
+        }
         save_manager_loaded = 1;
     }
     int save_count = save_manager_count();
     if (save_count && save_manager_selected >= save_count) save_manager_selected = save_count - 1;
+    if (save_count && save_backup_list_save != save_manager_selected) {
+        Result rc = save_manager_refresh_backups(save_manager_selected);
+        save_backup_list_save = save_manager_selected;
+        save_backup_selected = 0;
+        if (R_FAILED(rc)) {
+            snprintf(popup_text, sizeof(popup_text), "Backup history unavailable: %08X", (unsigned)rc);
+            popup_type = POPUP_INFO;
+            popup_active = true;
+            popup_start_tick = armGetSystemTick();
+        }
+    }
+    int backup_count = save_count ? save_manager_backup_count(save_manager_selected) : 0;
+    if (backup_count && save_backup_selected >= backup_count)
+        save_backup_selected = backup_count - 1;
     draw_card(r, 40, 2030 - sc, 1200, 270, s_save_manager_title[cur_lang]);
     draw_text_w(r, font_xs, s_save_manager_hint[cur_lang], 70, 2080 - sc, color_grey, 0, 1140);
     if (save_count > 0) {
         u64 title_id = 0; AccountUid uid = {{0}};
         if (R_SUCCEEDED(save_manager_get(save_manager_selected, &title_id, &uid))) {
-            char title_label[80];
-            snprintf(title_label, sizeof(title_label), "%s", s_unknown_game[cur_lang]);
-            for (int gi = 0; gi < installed_game_count; ++gi) {
-                if (installed_game_ids[gi] == title_id && installed_game_names[gi][0]) {
-                    snprintf(title_label, sizeof(title_label), "%s", installed_game_names[gi]);
-                    break;
-                }
-            }
-            snprintf(t, sizeof(t), "%s   |   %s   |   Save %d/%d", title_label,
+            snprintf(t, sizeof(t), "%s   |   %s   |   Save %d/%d", get_save_title_label(title_id),
                 get_save_profile_name(uid), save_manager_selected + 1, save_count);
             draw_text_w(r, font_sm, t, 70, 2130 - sc, color_cyan, 0, 1140);
+            if (backup_count > 0) {
+                u64 timestamp = 0;
+                if (R_SUCCEEDED(save_manager_get_backup_timestamp(save_manager_selected, save_backup_selected, &timestamp))) {
+                    time_t backup_time = (time_t)timestamp;
+                    struct tm *backup_tm = localtime(&backup_time);
+                    char date[32];
+                    if (!backup_tm || !strftime(date, sizeof(date), "%Y-%m-%d %H:%M", backup_tm))
+                        snprintf(date, sizeof(date), "Unix %llu", (unsigned long long)timestamp);
+                    snprintf(t, sizeof(t), "%s %d/%d: %s", s_save_backup_history[cur_lang],
+                        save_backup_selected + 1, backup_count, date);
+                    draw_text_w(r, font_xs, t, 70, 2152 - sc, color_grey, 0, 800);
+                }
+            } else {
+                draw_text_w(r, font_xs, s_save_no_backups[cur_lang], 70, 2152 - sc, color_grey, 0, 800);
+            }
             draw_rounded_box(r, 70, 2180 - sc, 100, 42, 6, color_card_border);
             draw_text(r, font_sm, "<", 120, 2188 - sc, color_white, 1);
             draw_rounded_box(r, 180, 2180 - sc, 100, 42, 6, color_card_border);
@@ -6692,9 +7815,27 @@ static void draw_pg6(SDL_Renderer *r) {
             draw_text_w(r, font_xs, s_save_backup_btn[cur_lang], 435, 2191 - sc, color_green, 1, 230);
             bool confirm_live = save_restore_confirm && armGetSystemTick() - save_restore_confirm_tick < armGetSystemTickFreq() * 8;
             if (save_restore_confirm && !confirm_live) save_restore_confirm = false;
-            draw_rounded_box(r, 580, 2180 - sc, 300, 42, 6, confirm_live ? color_red : color_card_border);
+            draw_rounded_box(r, 580, 2180 - sc, 300, 42, 6,
+                confirm_live ? color_red : (backup_count ? color_card_border : color_dark_grey));
             draw_text_w(r, font_xs, confirm_live ? s_save_restore_confirm_btn[cur_lang] : s_save_restore_btn[cur_lang], 730, 2191 - sc, color_white, 1, 280);
-            if (confirm_live) draw_text_w(r, font_xs, "Current save is backed up before restore.", 900, 2191 - sc, color_yellow, 0, 300);
+            draw_rounded_box(r, 900, 2180 - sc, 210, 42, 6,
+                backup_count ? color_card_border : color_dark_grey);
+            if (backup_count > 0) {
+                char selector[64];
+                snprintf(selector, sizeof(selector), s_save_backup_selector[cur_lang],
+                    save_backup_selected + 1, backup_count);
+                draw_text_w(r, font_xs, selector, 1005, 2191 - sc,
+                    color_cyan, 1, 196);
+            } else {
+                draw_text_w(r, font_xs, s_save_no_backups[cur_lang], 1005,
+                    2191 - sc, color_grey, 1, 196);
+            }
+            if (save_backup_result != 0) {
+                draw_text_w(r, font_xs, save_backup_result > 0 ?
+                    s_save_backup_success[cur_lang] : s_save_backup_failure[cur_lang],
+                    435, 2228 - sc, save_backup_result > 0 ? color_green : color_red,
+                    1, 360);
+            }
         }
     } else {
         draw_text_w(r, font_sm, "No accessible user saves. A full title-mode homebrew launch may be required.", 70, 2130 - sc, color_yellow, 0, 1140);
@@ -6707,45 +7848,45 @@ static void draw_pg6(SDL_Renderer *r) {
 
 // About
 static const char *about_features[LANG_MAX][7] = {
-    {"System - Firmware, hardware and battery", "Storage - SD information and file browser", "Network - Wi-Fi details and speed test", "Transfer - FTP and USB MTP", "Performance - Clocks, RAM and temperatures", "Controller - Buttons, sticks and motion sensors", "Tools - Brightness, vibration and diagnostics"},
-    {"Systeme - Micrologiciel, materiel et batterie", "Stockage - Carte SD et explorateur de fichiers", "Reseau - Wi-Fi et test de debit", "Transfert - FTP et MTP USB", "Performances - Frequences, RAM et temperatures", "Manette - Boutons, sticks et capteurs de mouvement", "Outils - Luminosite, vibrations et diagnostics"},
-    {"Sistema - Firmware, hardware e batteria", "Archiviazione - Scheda SD e file manager", "Rete - Wi-Fi e test di velocita", "Trasferimento - FTP e MTP USB", "Prestazioni - Frequenze, RAM e temperature", "Controller - Tasti, stick e sensori di movimento", "Strumenti - Luminosita, vibrazione e diagnostica"},
-    {"Sistema - Firmware, hardware y bateria", "Almacenamiento - Tarjeta SD y explorador de archivos", "Red - Wi-Fi y prueba de velocidad", "Transferencia - FTP y MTP por USB", "Rendimiento - Frecuencias, RAM y temperaturas", "Mando - Botones, sticks y sensores de movimiento", "Herramientas - Brillo, vibracion y diagnostico"},
-    {"System - Firmware, Hardware und Akku", "Speicher - SD-Karte und Dateimanager", "Netzwerk - WLAN und Geschwindigkeitstest", "Transfer - FTP und USB-MTP", "Leistung - Takt, RAM und Temperaturen", "Controller - Tasten, Sticks und Bewegungssensoren", "Werkzeuge - Helligkeit, Vibration und Diagnose"},
-    {"Sistema - Firmware, hardware e bateria", "Armazenamento - Cartao SD e gestor de ficheiros", "Rede - Wi-Fi e teste de velocidade", "Transferencia - FTP e MTP por USB", "Desempenho - Frequencias, RAM e temperaturas", "Controle - Botoes, sticks e sensores de movimento", "Ferramentas - Brilho, vibracao e diagnostico"},
-    {"Systeem - Firmware, hardware en batterij", "Opslag - SD-kaart en bestandsbeheer", "Netwerk - Wi-Fi en snelheidstest", "Overdracht - FTP en USB-MTP", "Prestaties - Klokken, RAM en temperaturen", "Controller - Knoppen, sticks en bewegingssensoren", "Hulpmiddelen - Helderheid, trilling en diagnose"},
-    {"システム - ファームウェア、機種、バッテリー", "ストレージ - SD情報とファイル管理", "ネットワーク - Wi-Fi情報と速度テスト", "転送 - FTPとUSB MTP", "性能 - クロック、RAM、温度", "コントローラー - ボタン、スティック、モーションセンサー", "ツール - 明るさ、振動、診断"},
-    {"Система - прошивка, модель и аккумулятор", "Хранилище - SD-карта и файловый менеджер", "Сеть - Wi-Fi и тест скорости", "Передача - FTP и USB MTP", "Производительность - частоты, RAM и температура", "Контроллер - кнопки, стики и датчики движения", "Инструменты - яркость, вибрация и диагностика"},
-    {"系统 - 固件、硬件型号与电池", "存储 - SD 卡信息与文件管理", "网络 - Wi-Fi 信息与速度测试", "传输 - FTP 与 USB MTP", "性能 - 时钟、内存与温度", "控制器 - 按键、摇杆与动作传感器", "工具 - 亮度、振动与诊断"},
-    {"시스템 - 펌웨어, 기기 정보 및 배터리", "저장소 - SD 정보 및 파일 관리자", "네트워크 - Wi-Fi 정보 및 속도 테스트", "전송 - FTP 및 USB MTP", "성능 - 클럭, RAM 및 온도", "컨트롤러 - 버튼, 스틱 및 모션 센서", "도구 - 밝기, 진동 및 진단"}
+    {"System - Firmware, hardware and battery", "Storage - SD information and file browser", "Network - Wi-Fi, speed test and live traffic", "Transfer - FTP and USB MTP", "Performance - Clocks, RAM and temperatures", "Controller - Buttons, sticks and motion sensors", "Tools - Brightness, vibration and diagnostics"},
+    {"Systeme - Micrologiciel, materiel et batterie", "Stockage - Carte SD et explorateur de fichiers", "Reseau - Wi-Fi, debit et trafic en direct", "Transfert - FTP et MTP USB", "Performances - Frequences, RAM et temperatures", "Manette - Boutons, sticks et capteurs de mouvement", "Outils - Luminosite, vibrations et diagnostics"},
+    {"Sistema - Firmware, hardware e batteria", "Archiviazione - Scheda SD e file manager", "Rete - Wi-Fi, velocita e traffico in tempo reale", "Trasferimento - FTP e MTP USB", "Prestazioni - Frequenze, RAM e temperature", "Controller - Tasti, stick e sensori di movimento", "Strumenti - Luminosita, vibrazione e diagnostica"},
+    {"Sistema - Firmware, hardware y bateria", "Almacenamiento - Tarjeta SD y explorador de archivos", "Red - Wi-Fi, velocidad y trafico en tiempo real", "Transferencia - FTP y MTP por USB", "Rendimiento - Frecuencias, RAM y temperaturas", "Mando - Botones, sticks y sensores de movimiento", "Herramientas - Brillo, vibracion y diagnostico"},
+    {"System - Firmware, Hardware und Akku", "Speicher - SD-Karte und Dateimanager", "Netzwerk - WLAN, Tempo und Live-Verkehr", "Transfer - FTP und USB-MTP", "Leistung - Takt, RAM und Temperaturen", "Controller - Tasten, Sticks und Bewegungssensoren", "Werkzeuge - Helligkeit, Vibration und Diagnose"},
+    {"Sistema - Firmware, hardware e bateria", "Armazenamento - Cartao SD e gestor de ficheiros", "Rede - Wi-Fi, velocidade e trafego em tempo real", "Transferencia - FTP e MTP por USB", "Desempenho - Frequencias, RAM e temperaturas", "Controle - Botoes, sticks e sensores de movimento", "Ferramentas - Brilho, vibracao e diagnostico"},
+    {"Systeem - Firmware, hardware en batterij", "Opslag - SD-kaart en bestandsbeheer", "Netwerk - Wi-Fi, snelheid en live verkeer", "Overdracht - FTP en USB-MTP", "Prestaties - Klokken, RAM en temperaturen", "Controller - Knoppen, sticks en bewegingssensoren", "Hulpmiddelen - Helderheid, trilling en diagnose"},
+    {"システム - ファームウェア、機種、バッテリー", "ストレージ - SD情報とファイル管理", "ネットワーク - Wi-Fi、速度、リアルタイム通信量", "転送 - FTPとUSB MTP", "性能 - クロック、RAM、温度", "コントローラー - ボタン、スティック、モーションセンサー", "ツール - 明るさ、振動、診断"},
+    {"Система - прошивка, модель и аккумулятор", "Хранилище - SD-карта и файловый менеджер", "Сеть - Wi-Fi, скорость и трафик в реальном времени", "Передача - FTP и USB MTP", "Производительность - частоты, RAM и температура", "Контроллер - кнопки, стики и датчики движения", "Инструменты - яркость, вибрация и диагностика"},
+    {"系统 - 固件、硬件型号与电池", "存储 - SD 卡信息与文件管理", "网络 - Wi-Fi、测速和实时流量", "传输 - FTP 与 USB MTP", "性能 - 时钟、内存与温度", "控制器 - 按键、摇杆与动作传感器", "工具 - 亮度、振动与诊断"},
+    {"시스템 - 펌웨어, 기기 정보 및 배터리", "저장소 - SD 정보 및 파일 관리자", "네트워크 - Wi-Fi, 속도 및 실시간 트래픽", "전송 - FTP 및 USB MTP", "성능 - 클럭, RAM 및 온도", "컨트롤러 - 버튼, 스틱 및 모션 센서", "도구 - 밝기, 진동 및 진단"}
 };
 
 static const char *about_changelog[LANG_MAX][5] = {
-    {"FTP/MTP transfer and file browser reliability", "System, hardware and battery diagnostics", "Controller and stick drift diagnostics", "Custom themes, OLED and Cyberpunk presets", "Network tests, JSON export and performance tools"},
-    {"Fiabilite du FTP/MTP et de l'explorateur", "Diagnostics systeme, materiel et batterie", "Diagnostics des manettes et sticks", "Themes personnalises, OLED et Cyberpunk", "Tests reseau, export JSON et outils de performance"},
-    {"Maggiore affidabilita FTP/MTP e file manager", "Diagnostica di sistema, hardware e batteria", "Diagnostica controller e stick", "Temi personalizzati, OLED e Cyberpunk", "Test di rete, export JSON e strumenti prestazioni"},
-    {"Mayor fiabilidad de FTP/MTP y del explorador", "Diagnostico de sistema, hardware y bateria", "Diagnostico del mando y los sticks", "Temas personalizados y estilos OLED y Cyberpunk", "Pruebas de red, exportacion JSON y rendimiento"},
-    {"FTP/MTP und Dateimanager verbessert", "System-, Hardware- und Akku-Diagnose", "Controller- und Stickdiagnose", "Eigene Themes sowie OLED- und Cyberpunk-Stile", "Netzwerktests, JSON-Export und Leistungstools"},
-    {"FTP/MTP e gestor de ficheiros mais fiaveis", "Diagnostico de sistema, hardware e bateria", "Diagnostico do controle e dos sticks", "Temas personalizados, OLED e Cyberpunk", "Testes de rede, exportacao JSON e desempenho"},
-    {"FTP/MTP en bestandsbeheer betrouwbaarder", "Diagnose van systeem, hardware en batterij", "Diagnose van controller en sticks", "Aangepaste thema's, OLED en Cyberpunk", "Netwerktests, JSON-export en prestatietools"},
-    {"FTP/MTP転送とファイル管理を改善", "システム、機器、バッテリー診断", "コントローラーとスティックの診断", "カスタムテーマ、OLED、Cyberpunkテーマ", "ネットワークテスト、JSON出力、性能ツール"},
-    {"Улучшена работа FTP/MTP и файлового менеджера", "Диагностика системы, оборудования и батареи", "Диагностика контроллеров и стиков", "Свои темы, стили OLED и Cyberpunk", "Сетевые тесты, экспорт JSON и инструменты производительности"},
-    {"改进 FTP/MTP 传输与文件管理", "系统、硬件和电池诊断", "控制器与摇杆诊断", "自定义主题、OLED 和 Cyberpunk 主题", "网络测试、JSON 导出与性能工具"},
-    {"FTP/MTP 전송 및 파일 관리자 개선", "시스템, 하드웨어 및 배터리 진단", "컨트롤러와 스틱 진단", "사용자 지정 테마, OLED 및 Cyberpunk 테마", "네트워크 테스트, JSON 내보내기 및 성능 도구"}
+    {"60s FPS/temperature graphs with min, average and max", "Touch controls for refresh and alert thresholds", "Dated save snapshots with selectable restore", "SD analyzer and selected-file details", "Wi-Fi history, live traffic, Ultrahand network OVL, transfer ETA and theme preview"},
+    {"Graphiques FPS/temperature 60 s avec min., moyenne et max.", "Reglages tactiles du rafraichissement et des alertes", "Copies datees avec restauration au choix", "Analyse SD et details du fichier selectionne", "Historique Wi-Fi, trafic en direct, overlay reseau Ultrahand, temps de transfert et apercu du theme"},
+    {"Grafici FPS/temperatura 60 s con min, media e max", "Controlli touch per aggiornamento e soglie avvisi", "Backup datati con ripristino selezionabile", "Analisi SD e dettagli del file selezionato", "Storico Wi-Fi, traffico live, overlay di rete Ultrahand, tempo trasferimento e anteprima tema"},
+    {"Graficas FPS/temperatura de 60 s con min, media y max", "Controles tactiles para alertas y actualizacion", "Copias fechadas con restauracion seleccionable", "Analisis SD y detalles del archivo seleccionado", "Historial Wi-Fi, trafico en directo, overlay de red Ultrahand, tiempo de transferencia y vista del tema"},
+    {"60-s-FPS/Temperaturdiagramme mit min., Mittel und max.", "Touch-Einstellungen fuer Aktualisierung und Warnungen", "Datierte Sicherungen gezielt wiederherstellen", "SD-Analyse und Details zur Dateiauswahl", "WLAN-Verlauf, Live-Verkehr, Ultrahand-Netzwerk-Overlay, Transferzeit und Designvorschau"},
+    {"Graficos FPS/temperatura de 60 s com min, media e max", "Controles touch para atualizacao e alertas", "Backups datados com restauracao selecionavel", "Analise SD e detalhes do ficheiro selecionado", "Historico Wi-Fi, trafego em direto, overlay de rede Ultrahand, tempo de transferencia e pre-visualizacao"},
+    {"FPS-/temperatuurgeschiedenis van 60 s met min., gem. en max.", "Aanraakbediening voor verversen en waarschuwingen", "Gedateerde back-ups selectief herstellen", "SD-analyse en details van geselecteerd bestand", "Wifi-geschiedenis, live verkeer, Ultrahand-netwerkoverlay, overdrachtstijd en themapreview"},
+    {"60秒FPS/温度グラフと最小・平均・最大値", "更新間隔と警告値をタッチ操作", "日付付きセーブから選択して復元", "SD分析と選択したファイルの詳細", "Wi-Fi履歴、リアルタイム通信量、Ultrahand通信量OVL、転送残り時間とテーマプレビュー"},
+    {"Графики FPS/температуры за 60 с: мин., среднее и макс.", "Настройка обновления и предупреждений касанием", "Выбор датированной копии для восстановления", "Анализ SD и сведения о выбранном файле", "История Wi-Fi, трафик в реальном времени, сетевой оверлей Ultrahand, время передачи и предпросмотр темы"},
+    {"60秒 FPS/温度图表及最小、平均、最大值", "可触控调整刷新间隔和警报阈值", "可选择日期存档进行恢复", "SD 分析和所选文件详情", "Wi-Fi 历史、实时流量、Ultrahand 网络覆盖层、传输剩余时间和主题预览"},
+    {"60초 FPS/온도 그래프와 최소·평균·최대값", "터치로 새로 고침 및 경고 임계값 조정", "날짜별 백업을 선택해 복원", "SD 분석 및 선택한 파일 정보", "Wi-Fi 기록, 실시간 트래픽, Ultrahand 네트워크 OVL, 전송 예상 시간, 테마 미리보기"}
 };
 
 static const char *about_roadmap[LANG_MAX][7] = {
-    {"USB Ethernet adapter diagnostics", "Bluetooth device scan and diagnostics", "Save manager improvements", "Safe fan curve integration", "Tesla overlay mode", "Theme import and export", "Real-time network traffic monitor"},
-    {"Diagnostic des adaptateurs Ethernet USB", "Recherche et diagnostic des appareils Bluetooth", "Ameliorations du gestionnaire de sauvegardes", "Courbe ventilateur securisee", "Mode overlay Tesla", "Import et export de themes", "Moniteur du trafic reseau en temps reel"},
-    {"Diagnostica adattatori Ethernet USB", "Ricerca e diagnostica dispositivi Bluetooth", "Migliorie gestione salvataggi", "Curva ventola sicura", "Modalita overlay Tesla", "Importazione ed esportazione temi", "Monitor traffico di rete in tempo reale"},
-    {"Diagnostico de adaptadores Ethernet USB", "Busqueda y diagnostico de dispositivos Bluetooth", "Mejoras del gestor de partidas", "Curva segura del ventilador", "Modo overlay de Tesla", "Importar y exportar temas", "Monitor de trafico de red en tiempo real"},
-    {"Diagnose von USB-Ethernet-Adaptern", "Bluetooth-Gerate suchen und diagnostizieren", "Verbesserungen der Spielstandverwaltung", "Sichere Lufterkurve", "Tesla-Overlay-Modus", "Themes importieren und exportieren", "Netzwerkverkehr in Echtzeit anzeigen"},
-    {"Diagnostico de adaptadores Ethernet USB", "Pesquisa e diagnostico de dispositivos Bluetooth", "Melhorias no gestor de saves", "Curva segura da ventoinha", "Modo overlay Tesla", "Importar e exportar temas", "Monitor de trafego de rede em tempo real"},
-    {"Diagnose van USB-Ethernetadapters", "Bluetoothapparaten zoeken en diagnosticeren", "Verbeteringen voor spelopslagbeheer", "Veilige ventilatorcurve", "Tesla-overlaymodus", "Thema's importeren en exporteren", "Netwerkverkeer in realtime bekijken"},
-    {"USB Ethernetアダプター診断", "Bluetooth機器の検索と診断", "セーブ管理の改善", "安全なファンカーブ", "Teslaオーバーレイモード", "テーマのインポートとエクスポート", "リアルタイム通信量モニター"},
-    {"Диагностика USB Ethernet-адаптеров", "Поиск и диагностика Bluetooth-устройств", "Улучшение менеджера сохранений", "Безопасная кривая вентилятора", "Режим оверлея Tesla", "Импорт и экспорт тем", "Монитор сетевого трафика в реальном времени"},
-    {"USB 以太网适配器诊断", "蓝牙设备扫描与诊断", "改进游戏存档管理", "安全的风扇曲线", "Tesla 覆盖层模式", "主题导入与导出", "实时网络流量监控"},
-    {"USB 이더넷 어댑터 진단", "Bluetooth 기기 검색 및 진단", "게임 저장 관리 개선", "안전한 팬 곡선", "Tesla 오버레이 모드", "테마 가져오기 및 내보내기", "실시간 네트워크 트래픽 모니터"}
+    {"USB Ethernet adapter diagnostics", "Bluetooth device scan and diagnostics", "Save manager improvements", "Safe fan curve integration", "Theme import and export", "Sysmodule support (in development)", "Transfer history and queue"},
+    {"Diagnostic des adaptateurs Ethernet USB", "Recherche et diagnostic des appareils Bluetooth", "Ameliorations du gestionnaire de sauvegardes", "Courbe ventilateur securisee", "Import et export de themes", "Support sysmodule (en developpement)", "Historique et file de transferts"},
+    {"Diagnostica adattatori Ethernet USB", "Ricerca e diagnostica dispositivi Bluetooth", "Migliorie gestione salvataggi", "Curva ventola sicura", "Importazione ed esportazione temi", "Supporto sysmodule (in sviluppo)", "Cronologia e coda trasferimenti"},
+    {"Diagnostico de adaptadores Ethernet USB", "Busqueda y diagnostico de dispositivos Bluetooth", "Mejoras del gestor de partidas", "Curva segura del ventilador", "Importar y exportar temas", "Soporte de sysmodule (en desarrollo)", "Historial y cola de transferencias"},
+    {"Diagnose von USB-Ethernet-Adaptern", "Bluetooth-Gerate suchen und diagnostizieren", "Verbesserungen der Spielstandverwaltung", "Sichere Lufterkurve", "Themes importieren und exportieren", "Sysmodule-Unterstutzung (in Entwicklung)", "Transferverlauf und Warteschlange"},
+    {"Diagnostico de adaptadores Ethernet USB", "Pesquisa e diagnostico de dispositivos Bluetooth", "Melhorias no gestor de saves", "Curva segura da ventoinha", "Importar e exportar temas", "Suporte a sysmodule (em desenvolvimento)", "Historico e fila de transferencias"},
+    {"Diagnose van USB-Ethernetadapters", "Bluetoothapparaten zoeken en diagnosticeren", "Verbeteringen voor spelopslagbeheer", "Veilige ventilatorcurve", "Thema's importeren en exporteren", "Sysmodule-ondersteuning (in ontwikkeling)", "Overdrachtgeschiedenis en wachtrij"},
+    {"USB Ethernetアダプター診断", "Bluetooth機器の検索と診断", "セーブ管理の改善", "安全なファンカーブ", "テーマのインポートとエクスポート", "Sysmodule対応（開発中）", "転送履歴とキュー"},
+    {"Диагностика USB Ethernet-адаптеров", "Поиск и диагностика Bluetooth-устройств", "Улучшение менеджера сохранений", "Безопасная кривая вентилятора", "Импорт и экспорт тем", "Поддержка sysmodule (в разработке)", "История и очередь передачи"},
+    {"USB 以太网适配器诊断", "蓝牙设备扫描与诊断", "改进游戏存档管理", "安全的风扇曲线", "主题导入与导出", "Sysmodule 支持（开发中）", "传输历史与队列"},
+    {"USB 이더넷 어댑터 진단", "Bluetooth 기기 검색 및 진단", "게임 저장 관리 개선", "안전한 팬 곡선", "테마 가져오기 및 내보내기", "Sysmodule 지원(개발 중)", "전송 기록 및 대기열"}
 };
 
 static const char *about_libraries[LANG_MAX] = {
@@ -6777,8 +7918,8 @@ static const char *about_thanks[LANG_MAX] = {
 };
 
 static const char *about_changelog_title[LANG_MAX] = {
-    "v0.4 Changelog", "Nouveautes v0.4", "Novita v0.4", "Novedades v0.4", "Neuerungen v0.4", "Novidades v0.4", "Wijzigingen v0.4",
-    "v0.4 更新内容", "Изменения v0.4", "v0.4 更新内容", "v0.4 변경 사항"
+    "v0.5 Changelog", "Nouveautes v0.5", "Novita v0.5", "Novedades v0.5", "Neuerungen v0.5", "Novidades v0.5", "Wijzigingen v0.5",
+    "v0.5 更新内容", "Изменения v0.5", "v0.5 更新内容", "v0.5 변경 사항"
 };
 static const char *about_planned_title[LANG_MAX] = {
     "Planned for later", "Prevu pour plus tard", "Previsto per dopo", "Planeado para mas adelante", "Fuer spater geplant", "Planeado para depois", "Gepland voor later",
@@ -6828,7 +7969,14 @@ static void draw_pg7(SDL_Renderer *r) {
     draw_text_w(r, font_sm, s_desc_line2[cur_lang], 70, y, color_white, 0, 1140);
     y += 30;
 
+    static const SDL_Color section_colors[7] = {
+        {0, 210, 255, 255}, {170, 120, 255, 255}, {80, 190, 255, 255},
+        {80, 220, 150, 255}, {255, 190, 80, 255}, {255, 100, 130, 255},
+        {180, 190, 210, 255}
+    };
     for (int i = 0; i < 7; i++) {
+        filledCircleRGBA(r, 75, y + 8, 4, section_colors[i].r, section_colors[i].g,
+            section_colors[i].b, 230);
         draw_text_w(r, font_sm, about_features[cur_lang][i], 90, y, color_grey, 0, 1120);
         y += 25;
     }
@@ -6865,7 +8013,7 @@ static void draw_pg7(SDL_Renderer *r) {
 static void draw_pg8(SDL_Renderer *r) {
     int view_top = 140, view_bottom = 650;
     int view_h = view_bottom - view_top;
-    int content_bottom = 960;
+    int content_bottom = 1000;
     int content_h = content_bottom - view_top;
     settings_scroll_max = content_h > view_h ? content_h - view_h : 0;
     if (settings_scroll > settings_scroll_max) settings_scroll = settings_scroll_max;
@@ -6927,9 +8075,9 @@ static void draw_pg8(SDL_Renderer *r) {
     int cur_rsel = 0;
     for (int i = 0; i < rcnt; i++) {
         if (refresh_vals[i] == auto_refresh_interval) cur_rsel = i;
-        int bx = 690 + i * 104;
-        draw_rounded_box(r, bx, y - 4, 100, 36, 6, (settings_sel == 2 && i == cur_rsel) ? color_dark_grey : color_card_border);
-        draw_text_w(r, font_sm, s_refresh_names[cur_lang][i], bx + 50, y + 4, (settings_sel == 2 && i == cur_rsel) ? color_cyan : color_grey, 1, 92);
+        int bx = 70 + i * 112;
+        draw_rounded_box(r, bx, y - 4, 100, 36, 6, i == cur_rsel ? color_dark_grey : color_card_border);
+        draw_text_w(r, font_sm, s_refresh_names[cur_lang][i], bx + 50, y + 4, i == cur_rsel ? color_cyan : color_grey, 1, 92);
     }
     y += 60;
 
@@ -6937,7 +8085,11 @@ static void draw_pg8(SDL_Renderer *r) {
     draw_text(r, font_md, settings_temp_alert_label[cur_lang], 70, y, color_cyan, 0);
     y += 36;
     draw_rounded_box(r, 70, y, 200, 36, 6, (settings_sel == 3) ? color_dark_grey : color_card_border);
+    draw_rounded_box(r, 80, y + 3, 34, 30, 5, color_card_border);
+    draw_text(r, font_sm, "-", 97, y + 8, color_white, 1);
     draw_temperature(r, font_sm, temp_alert_millic, 170, y + 6, (settings_sel == 3) ? color_cyan : color_grey, 1);
+    draw_rounded_box(r, 226, y + 3, 34, 30, 5, color_card_border);
+    draw_text(r, font_sm, "+", 243, y + 8, color_white, 1);
     y += 52;
 
     // Memory alert threshold
@@ -6945,12 +8097,35 @@ static void draw_pg8(SDL_Renderer *r) {
     y += 36;
     char vmem[64]; snprintf(vmem, sizeof(vmem), "%d%%", (int)(mem_alert_frac * 100.0f));
     draw_rounded_box(r, 70, y, 200, 36, 6, (settings_sel == 4) ? color_dark_grey : color_card_border);
+    draw_rounded_box(r, 80, y + 3, 34, 30, 5, color_card_border);
+    draw_text(r, font_sm, "-", 97, y + 8, color_white, 1);
     draw_text(r, font_sm, vmem, 170, y + 6, (settings_sel == 4) ? color_cyan : color_grey, 1);
+    draw_rounded_box(r, 226, y + 3, 34, 30, 5, color_card_border);
+    draw_text(r, font_sm, "+", 243, y + 8, color_white, 1);
     y += 52;
 
     // Info
     draw_text(r, font_xs, settings_info[cur_lang], 70, y, color_grey, 0);
     draw_text(r, font_sm, s_settings_info2[cur_lang], 70, y + 40, color_grey, 0);
+    draw_rounded_box(r, 70, 900 - sc, 390, 40, 8, color_card_border);
+    draw_rounded_rect(r, 70, 900 - sc, 390, 40, 8, color_cyan);
+    draw_text_w(r, font_sm, s_tutorial_settings[cur_lang], 265, 910 - sc,
+        color_white, 1, 370);
+
+    int preview_x = 690, preview_y = 830;
+    draw_rounded_box(r, preview_x, preview_y, 510, 100, 8, color_card);
+    draw_rounded_rect(r, preview_x, preview_y, 510, 100, 8, color_card_border);
+    draw_text_w(r, font_xs, s_theme_preview[cur_lang], preview_x + 18, preview_y + 10,
+        color_cyan, 0, 280);
+    draw_text_w(r, font_sm, theme_names[cur_theme], preview_x + 18, preview_y + 35,
+        color_white, 0, 180);
+    draw_rounded_box(r, preview_x + 205, preview_y + 32, 90, 48, 6, color_bg);
+    draw_rounded_rect(r, preview_x + 205, preview_y + 32, 90, 48, 6, color_card_border);
+    draw_rounded_box(r, preview_x + 215, preview_y + 41, 70, 30, 4, color_card);
+    draw_rounded_rect(r, preview_x + 215, preview_y + 41, 70, 30, 4, color_card_border);
+    draw_rounded_box(r, preview_x + 310, preview_y + 43, 42, 16, 5, color_cyan);
+    draw_rounded_box(r, preview_x + 360, preview_y + 43, 42, 16, 5, color_green);
+    draw_text_w(r, font_xs, "UI colors", preview_x + 415, preview_y + 44, color_grey, 0, 80);
 
     SDL_RenderSetClipRect(r, NULL);
 
@@ -6982,7 +8157,20 @@ static void draw_pg8(SDL_Renderer *r) {
         SDL_Color *cte_colors[] = {&custom_bg,&custom_card,&custom_border,&custom_cyan,&custom_green,&custom_white,&custom_grey,&custom_dark_grey,&custom_bg2,&custom_bg3};
         int cte_count = sizeof(cte_colors)/sizeof(cte_colors[0]);
 
-        int cx = 110, cy = 145;
+        int cx = 110, cy = 177;
+        for (int i = 0; i < 3; i++) {
+            int px = 110 + i * 365;
+            draw_rounded_box(r, px, 138, 340, 30, 7,
+                (SDL_Color){color_card.r, color_card.g, color_card.b, 255});
+            draw_rounded_rect(r, px, 138, 340, 30, 7,
+                i == 0 ? color_cyan : (i == 1 ? color_orange : color_green));
+            filledCircleRGBA(r, px + 18, 153, 5,
+                i == 0 ? 0 : (i == 1 ? 255 : 92),
+                i == 0 ? 195 : (i == 1 ? 125 : 230),
+                i == 0 ? 255 : (i == 1 ? 70 : 150), 255);
+            draw_text_w(r, font_xs, s_cte_quick[cur_lang][i], px + 34, 146,
+                color_white, 0, 280);
+        }
         for (int i = 0; i < cte_count; i++) {
             int row = i / 2;
             int col = i % 2;
@@ -7034,6 +8222,102 @@ static void draw_pg8(SDL_Renderer *r) {
         // Touch hints
         draw_text(r, font_xs, s_cte_touch_hint[cur_lang], 640, btn_y + 56, color_grey, 1);
     }
+}
+
+static void draw_tutorial(SDL_Renderer *r) {
+    SDL_SetRenderDrawBlendMode(r, SDL_BLENDMODE_BLEND);
+    SDL_SetRenderDrawColor(r, 0, 0, 0, 220);
+    SDL_Rect scrim = {0, 0, W, H};
+    SDL_RenderFillRect(r, &scrim);
+    SDL_SetRenderDrawBlendMode(r, SDL_BLENDMODE_NONE);
+
+    draw_card_shadow(r, 70, 70, 1140, 580);
+    draw_rounded_box(r, 70, 70, 1140, 580, 14, color_bg2);
+    draw_rounded_rect(r, 70, 70, 1140, 580, 14, color_cyan);
+    draw_text_w(r, font_lg, s_tutorial_title[cur_lang], 640, 105, color_white, 1, 1060);
+
+    char step_label[32];
+    snprintf(step_label, sizeof(step_label), "%d / 5", tutorial_step + 1);
+    draw_text(r, font_sm, step_label, 640, 178, color_cyan, 1);
+    draw_rounded_box(r, 150, 218, 980, 6, 3, color_dark_grey);
+    draw_rounded_box(r, 150, 218, 980 * (tutorial_step + 1) / 5, 6, 3, color_cyan);
+    draw_rounded_box(r, 130, 250, 1020, 270, 12, color_card);
+    draw_rounded_rect(r, 130, 250, 1020, 270, 12, color_card_border);
+    draw_rounded_box(r, 130, 264, 5, 242, 2, color_cyan);
+
+    SDL_Surface *body = TTF_RenderUTF8_Blended_Wrapped(font_md,
+        s_tutorial_steps[cur_lang][tutorial_step], color_white, 980);
+    if (body) {
+        SDL_Texture *texture = SDL_CreateTextureFromSurface(r, body);
+        if (texture) {
+            SDL_Rect dst = {(W - body->w) / 2, 285, body->w, body->h};
+            SDL_RenderCopy(r, texture, NULL, &dst);
+            SDL_DestroyTexture(texture);
+        }
+        SDL_FreeSurface(body);
+    }
+
+    if (tutorial_write_failed)
+        draw_text_w(r, font_xs, s_tutorial_write_error[cur_lang], 640, 500, color_red, 1, 1040);
+
+    int button_y = 560;
+    draw_rounded_box(r, 120, button_y, 220, 48, 8,
+        tutorial_step == 0 ? color_dark_grey : color_card_border);
+    draw_text_w(r, font_sm, s_tutorial_previous[cur_lang], 230, button_y + 12,
+        tutorial_step == 0 ? color_grey : color_white, 1, 200);
+    draw_rounded_box(r, 380, button_y, 220, 48, 8, color_card_border);
+    draw_text_w(r, font_sm, s_tutorial_skip[cur_lang], 490, button_y + 12, color_grey, 1, 200);
+    bool last_step = tutorial_step == 4;
+    draw_rounded_box(r, 940, button_y, 220, 48, 8, color_green);
+    draw_text_w(r, font_sm, last_step ? s_tutorial_finish[cur_lang] :
+        s_tutorial_next[cur_lang], 1050, button_y + 12, color_bg, 1, 200);
+}
+
+static void draw_tesla_guide(SDL_Renderer *r) {
+    SDL_SetRenderDrawBlendMode(r, SDL_BLENDMODE_BLEND);
+    SDL_SetRenderDrawColor(r, 0, 0, 0, 220);
+    SDL_Rect scrim = {0, 0, W, H};
+    SDL_RenderFillRect(r, &scrim);
+    SDL_SetRenderDrawBlendMode(r, SDL_BLENDMODE_NONE);
+
+    draw_card_shadow(r, 70, 70, 1140, 580);
+    draw_rounded_box(r, 70, 70, 1140, 580, 14, color_bg2);
+    draw_rounded_rect(r, 70, 70, 1140, 580, 14, color_cyan);
+    draw_text_w(r, font_lg, s_tesla_guide_title[cur_lang], 640, 105, color_white, 1, 1060);
+
+    char step_label[32];
+    snprintf(step_label, sizeof(step_label), "%d / 5", tesla_guide_step + 1);
+    draw_text(r, font_sm, step_label, 640, 178, color_cyan, 1);
+    draw_rounded_box(r, 150, 218, 980, 6, 3, color_dark_grey);
+    draw_rounded_box(r, 150, 218, 980 * (tesla_guide_step + 1) / 5, 6, 3, color_cyan);
+
+    SDL_Surface *body = TTF_RenderUTF8_Blended_Wrapped(font_md,
+        s_tesla_guide_steps[cur_lang][tesla_guide_step], color_white, 980);
+    if (body) {
+        SDL_Texture *texture = SDL_CreateTextureFromSurface(r, body);
+        if (texture) {
+            SDL_Rect dst = {(W - body->w) / 2, 270, body->w, body->h};
+            SDL_RenderCopy(r, texture, NULL, &dst);
+            SDL_DestroyTexture(texture);
+        }
+        SDL_FreeSurface(body);
+    }
+
+    draw_text_w(r, font_xs, "https://github.com/dodosiiii/SwitchInfoNX/releases",
+        640, 500, color_cyan, 1, 1060);
+
+    int button_y = 560;
+    draw_rounded_box(r, 120, button_y, 220, 48, 8,
+        tesla_guide_step == 0 ? color_dark_grey : color_card_border);
+    draw_text_w(r, font_sm, s_tutorial_previous[cur_lang], 230, button_y + 12,
+        tesla_guide_step == 0 ? color_grey : color_white, 1, 200);
+    draw_rounded_box(r, 380, button_y, 220, 48, 8, color_card_border);
+    draw_text_w(r, font_sm, s_tesla_guide_close[cur_lang], 490, button_y + 12,
+        color_grey, 1, 200);
+    bool last_step = tesla_guide_step == 4;
+    draw_rounded_box(r, 940, button_y, 220, 48, 8, color_green);
+    draw_text_w(r, font_sm, last_step ? s_tesla_guide_close[cur_lang] :
+        s_tutorial_next[cur_lang], 1050, button_y + 12, color_bg, 1, 200);
 }
 
 // File browser modes
@@ -7091,7 +8375,9 @@ static void draw_file_browser(SDL_Renderer *r) {
 
     // Column headers
     draw_text(r, font_xs, s_name_col[cur_lang], list_x, 202, color_grey, 0);
-    draw_text(r, font_xs, s_size_col[cur_lang], list_x + 820, 202, color_grey, 0);
+    char size_heading[64];
+    snprintf(size_heading, sizeof(size_heading), "%s  [%s]", s_size_col[cur_lang], s_size_sort_names[cur_lang][fb_sort_mode]);
+    draw_text_w(r, font_xs, size_heading, list_x + 820, 202, color_cyan, 0, 330);
     thickLineRGBA(r, list_x, 217, list_x + list_w, 217, 1,
         color_card_border.r, color_card_border.g, color_card_border.b, color_card_border.a);
 
@@ -7156,14 +8442,36 @@ static void draw_file_browser(SDL_Renderer *r) {
             SDL_SetRenderDrawColor(r, color_cyan.r, color_cyan.g, color_cyan.b, 255);
             SDL_RenderFillRect(r, &cur);
         }
+        draw_rounded_box(r, 750, 684, 150, 30, 6, color_green);
+        draw_text_w(r, font_xs, s_fb_rename_btn[cur_lang], 825, 692, color_white, 1, 136);
+        draw_rounded_box(r, 920, 684, 150, 30, 6, color_card_border);
+        draw_text_w(r, font_xs, s_cte_cancel[cur_lang], 995, 692, color_white, 1, 136);
     } else if (fb_mode == FB_MODE_CONFIRM_DELETE) {
         draw_text(r, font_sm, s_fb_delete_q[cur_lang], 20, 678, color_red, 0);
-        draw_text(r, font_sm, s_fb_confirm_del[cur_lang], 500, 678, color_grey, 0);
+        draw_text_w(r, font_xs, s_fb_confirm_del[cur_lang], 20, 700, color_grey, 0, 620);
+        draw_rounded_box(r, 790, 674, 170, 34, 6, color_red);
+        draw_text_w(r, font_xs, s_fb_delete_btn[cur_lang], 875, 683, color_white, 1, 156);
+        draw_rounded_box(r, 980, 674, 170, 34, 6, color_card_border);
+        draw_text_w(r, font_xs, "Cancel", 1065, 683, color_white, 1, 156);
     } else {
-        draw_text(r, font_sm, s_fb_browse_hint[cur_lang], 20, 672, color_grey, 0);
+        if (fb_selected >= 0 && fb_selected < fb_count) {
+            char selected_info[360];
+            char size_text[32];
+            if (fb_is_dir[fb_selected]) {
+                snprintf(selected_info, sizeof(selected_info), "%s  |  Folder",
+                    fb_entries[fb_selected]);
+            } else {
+                format_bytes(fb_sizes[fb_selected], size_text, sizeof(size_text));
+                snprintf(selected_info, sizeof(selected_info), "%s  |  File  |  %s",
+                    fb_entries[fb_selected], size_text);
+            }
+            draw_text_w(r, font_xs, selected_info, 20, 674, color_cyan, 0, 620);
+        } else {
+            draw_text_w(r, font_xs, s_fb_browse_hint[cur_lang], 20, 674, color_grey, 0, 620);
+        }
         if (fb_clipboard_path[0])
-            draw_text(r, font_sm, s_fb_paste[cur_lang], 660, 672, color_cyan, 0);
-        draw_text(r, font_sm, s_fb_other_hint[cur_lang], 20, 694, color_grey, 0);
+            draw_text_w(r, font_xs, s_fb_paste[cur_lang], 660, 674, color_cyan, 0, 560);
+        draw_text_w(r, font_xs, s_fb_other_hint[cur_lang], 20, 696, color_grey, 0, 1220);
     }
 }
 
@@ -7199,7 +8507,7 @@ static void fb_rename_selected(const char *new_name) {
     snprintf(newp, sizeof(newp), "%s/%s", fb_path, new_name);
 
     if (rename(oldp, newp) == 0) {
-        snprintf(fb_status_msg, sizeof(fb_status_msg), "Renamed to: %s", new_name);
+        snprintf(fb_status_msg, sizeof(fb_status_msg), "Renamed to: %.110s", new_name);
         fb_open(fb_path);
     } else {
         snprintf(fb_status_msg, sizeof(fb_status_msg), "Error renaming: %s", strerror(errno));
@@ -7300,6 +8608,23 @@ static void fb_paste(void) {
     fb_status_tick = armGetSystemTick();
 }
 
+static bool ui_cursor_push_click(void) {
+    SDL_Event event;
+    memset(&event, 0, sizeof(event));
+    event.type = SDL_MOUSEBUTTONDOWN;
+    event.button.button = SDL_BUTTON_LEFT;
+    event.button.state = SDL_PRESSED;
+    event.button.which = 1;
+    event.button.x = ui_cursor_x;
+    event.button.y = ui_cursor_y;
+    int down_result = SDL_PushEvent(&event);
+
+    event.type = SDL_MOUSEBUTTONUP;
+    event.button.state = SDL_RELEASED;
+    SDL_PushEvent(&event);
+    return down_result == 1;
+}
+
 // ─── Main loop ─────────────────────────────────────────────
 
 int main(int argc, char *argv[]) {
@@ -7307,7 +8632,6 @@ int main(int argc, char *argv[]) {
     SDL_Window *window = NULL;
     SDL_Renderer *renderer = NULL;
     bool sdl_initialized = false, ttf_initialized = false;
-    bool account_init_ok = false;
 
     // Initialize Switch services
     setsysInitialize();
@@ -7332,11 +8656,17 @@ int main(int argc, char *argv[]) {
 
     // Load settings config
     load_config();
+    bool tutorial_state_found = false;
+    tutorial_completed = tutorial_load_completed(&tutorial_state_found);
+    if (!tutorial_state_found && !tutorial_save_state(false))
+        tutorial_write_failed = true;
     load_game_stats();
 
     // Initialize log mutexes once (used by Transfer page and server threads)
     mutexInit(&ftp_log_mtx);
     mutexInit(&mtp_log_mtx);
+    mutexInit(&storage_scan_mutex);
+    storage_scan_mutex_ready = true;
 
     // Initialize MAC address via socket ioctl
     int s = socket(AF_INET, SOCK_DGRAM, 0);
@@ -7387,6 +8717,8 @@ int main(int argc, char *argv[]) {
         // No font available
         goto exit_app;
     }
+    tutorial_active = !tutorial_completed;
+    tutorial_step = 0;
 
     int cur = 0;
     bool quit = false;
@@ -7399,8 +8731,83 @@ int main(int argc, char *argv[]) {
     last_refresh = armGetSystemTick();
 
     while (appletMainLoop() && !quit) {
+        if (net_ping_capture_pending && !net_test_running) {
+            if (net_ping_ms > 0.0f) {
+                net_ping_history[net_ping_history_pos] = net_ping_ms;
+                net_ping_history_pos = (net_ping_history_pos + 1) % NET_PING_HIST_SIZE;
+                if (net_ping_history_count < NET_PING_HIST_SIZE) net_ping_history_count++;
+            }
+            net_ping_capture_pending = false;
+        }
         padUpdate(&pad);
+        network_sample_traffic();
         u64 down = padGetButtonsDown(&pad);
+        bool tutorial_input_captured = tutorial_active || tesla_guide_active;
+        if (tutorial_active) {
+            if (down & HidNpadButton_A) tutorial_next();
+            if (down & HidNpadButton_B) {
+                if (tutorial_step > 0) tutorial_step--;
+                else tutorial_finish();
+            }
+            if (down & HidNpadButton_Left) {
+                if (tutorial_step > 0) tutorial_step--;
+            }
+            if (down & HidNpadButton_Right) tutorial_next();
+            down = 0;
+        } else if (tesla_guide_active) {
+            if (down & HidNpadButton_A) {
+                if (tesla_guide_step < 4) tesla_guide_step++;
+                else tesla_guide_active = false;
+            }
+            if (down & HidNpadButton_B) tesla_guide_active = false;
+            if ((down & HidNpadButton_Left) && tesla_guide_step > 0)
+                tesla_guide_step--;
+            if (down & HidNpadButton_Right) {
+                if (tesla_guide_step < 4) tesla_guide_step++;
+                else tesla_guide_active = false;
+            }
+            down = 0;
+        }
+        bool virtual_a_click = false;
+        if (!screen_test_active) {
+            HidAnalogStickState left_stick = padGetStickPos(&pad, 0);
+            HidAnalogStickState right_stick = padGetStickPos(&pad, 1);
+            if (abs(left_stick.x) > 8000 || abs(left_stick.y) > 8000) {
+                ui_cursor_x += left_stick.x * 18 / 32768;
+                ui_cursor_y -= left_stick.y * 18 / 32768;
+                if (ui_cursor_x < 40) ui_cursor_x = 40;
+                if (ui_cursor_x > W - 40) ui_cursor_x = W - 40;
+                if (ui_cursor_y < 35) ui_cursor_y = 35;
+                if (ui_cursor_y > H - 30) ui_cursor_y = H - 30;
+            }
+            if (!tutorial_input_captured && !popup_active && !screen_test_active &&
+                !custom_theme_editing && !(cur == 1 && fb_active)) {
+                int *scroll_value = NULL;
+                int scroll_limit = 0;
+                switch (cur) {
+                    case 0: scroll_value = &system_scroll; scroll_limit = system_scroll_max; break;
+                    case 1: scroll_value = &storage_scroll; scroll_limit = storage_scroll_max; break;
+                    case 2: scroll_value = &net_scroll; scroll_limit = net_scroll_max; break;
+                    case 4: scroll_value = &perf_scroll; scroll_limit = perf_scroll_max; break;
+                    case 5: scroll_value = &ctrl_scroll; scroll_limit = ctrl_scroll_max; break;
+                    case 6: scroll_value = &tools_scroll; scroll_limit = tools_scroll_max; break;
+                    case 7: scroll_value = &about_scroll; scroll_limit = about_scroll_max; break;
+                    case 8: scroll_value = &settings_scroll; scroll_limit = settings_scroll_max; break;
+                    default: break;
+                }
+                if (scroll_value && scroll_limit > 0 && abs(right_stick.y) > 8000) {
+                    int scroll_delta = -right_stick.y * 16 / 32768;
+                    if (scroll_delta == 0) scroll_delta = right_stick.y > 0 ? -1 : 1;
+                    *scroll_value += scroll_delta;
+                    if (*scroll_value < 0) *scroll_value = 0;
+                    if (*scroll_value > scroll_limit) *scroll_value = scroll_limit;
+                }
+            }
+            if (!tutorial_input_captured && (down & HidNpadButton_A)) {
+                virtual_a_click = ui_cursor_push_click();
+                if (virtual_a_click) down &= ~HidNpadButton_A;
+            }
+        }
         fan_safety_update();
         if (!vibe_init_ok) {
             static u64 vibration_retry_tick = 0;
@@ -7450,6 +8857,8 @@ int main(int argc, char *argv[]) {
         // SDL events (touch + mouse support)
         SDL_Event event;
         static int touch_start_y = 0;
+        static bool touch_scroll_blocked = false;
+        static bool touch_scroll_active = false;
         while (SDL_PollEvent(&event)) {
             if (event.type == SDL_QUIT) quit = true;
 
@@ -7470,7 +8879,62 @@ int main(int argc, char *argv[]) {
                 mx = (int)(event.tfinger.x * W); my = (int)(event.tfinger.y * H); ev_move = 1;
             }
 
-            if (ev_up) touch_vibe_index = -1;
+            if (ev_up) {
+                touch_vibe_index = -1;
+                touch_scroll_active = false;
+                touch_scroll_blocked = false;
+            }
+            if (tutorial_active) {
+                if (ev_down && my >= 560 && my <= 608) {
+                    if (mx >= 120 && mx <= 340) {
+                        if (tutorial_step > 0) tutorial_step--;
+                    } else if (mx >= 380 && mx <= 600) {
+                        tutorial_finish();
+                    } else if (mx >= 940 && mx <= 1160) {
+                        tutorial_next();
+                    }
+                }
+                continue;
+            }
+            if (tesla_guide_active) {
+                if (ev_down && my >= 560 && my <= 608) {
+                    if (mx >= 120 && mx <= 340) {
+                        if (tesla_guide_step > 0) tesla_guide_step--;
+                    } else if (mx >= 380 && mx <= 600) {
+                        tesla_guide_active = false;
+                    } else if (mx >= 940 && mx <= 1160) {
+                        if (tesla_guide_step < 4) tesla_guide_step++;
+                        else tesla_guide_active = false;
+                    }
+                }
+                continue;
+            }
+            if (cur == 6 && !popup_active && ev_down && mx >= 690 && mx <= 1210 &&
+                my >= 974 - tools_scroll && my <= 1006 - tools_scroll) {
+                tesla_guide_step = 0;
+                tesla_guide_active = true;
+                continue;
+            }
+            if (cur == 6 && !popup_active && ev_down && mx >= 930 && mx <= 1210 &&
+                my >= 274 - tools_scroll && my <= 312 - tools_scroll) {
+                Result toggle_rc = lbl_auto_supported() ? lblInitialize() : MAKERESULT(Module_Libnx, LibnxError_NotInitialized);
+                if (R_SUCCEEDED(toggle_rc)) {
+                    bool auto_br_enabled = false;
+                    toggle_rc = lblIsAutoBrightnessControlEnabled(&auto_br_enabled);
+                    if (R_SUCCEEDED(toggle_rc)) {
+                        toggle_rc = auto_br_enabled ? lblDisableAutoBrightnessControl() :
+                            lblEnableAutoBrightnessControl();
+                    }
+                    lblExit();
+                }
+                if (R_FAILED(toggle_rc)) {
+                    snprintf(popup_text, sizeof(popup_text), "Auto brightness failed: %08X",
+                        (unsigned)toggle_rc);
+                    popup_type = POPUP_INFO;
+                    popup_active = true;
+                    popup_start_tick = armGetSystemTick();
+                }
+            }
             if (cur == 6 && ev_down) {
                 int rumble_y = 460 - tools_scroll;
                 if (my >= rumble_y && my <= rumble_y + 40) {
@@ -7611,35 +9075,67 @@ int main(int argc, char *argv[]) {
                 int save_action_y = 2180 - tools_scroll;
                 if (mx >= 40 && mx <= 1240 && my >= save_card_y && my <= save_card_y + 270) {
                     int save_count = save_manager_count();
+                    bool save_action_handled = false;
                     if (save_count > 0 && my >= save_action_y && my <= save_action_y + 44) {
                         if (mx >= 70 && mx <= 170) {
                             save_manager_selected = (save_manager_selected + save_count - 1) % save_count;
+                            save_backup_list_save = -1;
+                            save_backup_selected = 0;
+                            save_backup_result = 0;
                             save_restore_confirm = false;
+                            save_action_handled = true;
                         } else if (mx >= 180 && mx <= 280) {
                             save_manager_selected = (save_manager_selected + 1) % save_count;
+                            save_backup_list_save = -1;
+                            save_backup_selected = 0;
+                            save_backup_result = 0;
                             save_restore_confirm = false;
+                            save_action_handled = true;
                         } else if (mx >= 310 && mx <= 560) {
                             Result rc = save_manager_backup(save_manager_selected);
-                            if (R_SUCCEEDED(rc)) add_alert("Save backup created on SD.");
-                            else { snprintf(popup_text, sizeof(popup_text), "Backup failed: %08X", (unsigned)rc); popup_type = POPUP_INFO; popup_active = true; popup_start_tick = armGetSystemTick(); }
+                            if (R_SUCCEEDED(rc)) {
+                                save_backup_result = 1;
+                                add_alert("Save backup created on SD.");
+                                save_backup_list_save = -1;
+                            }
+                            else {
+                                save_backup_result = -1;
+                                snprintf(popup_text, sizeof(popup_text), "Backup failed: %08X", (unsigned)rc);
+                                popup_type = POPUP_INFO;
+                                popup_active = true;
+                                popup_start_tick = armGetSystemTick();
+                            }
                             save_restore_confirm = false;
+                            save_action_handled = true;
                         } else if (mx >= 580 && mx <= 880) {
                             bool confirm_live = save_restore_confirm && armGetSystemTick() - save_restore_confirm_tick < armGetSystemTickFreq() * 8;
-                            if (!confirm_live) {
+                            int backup_count = save_manager_backup_count(save_manager_selected);
+                            if (!backup_count) {
+                                add_alert("Create a backup before restoring.");
+                            } else if (!confirm_live) {
                                 save_restore_confirm = true;
                                 save_restore_confirm_tick = armGetSystemTick();
                                 add_alert("Tap RESTORE again within 8 seconds to confirm.");
                             } else {
                                 save_restore_confirm = false;
-                                Result rc = save_manager_restore_latest(save_manager_selected);
-                                if (R_SUCCEEDED(rc)) add_alert("Save restored; previous data backed up.");
+                                Result rc = save_manager_restore_backup(save_manager_selected, save_backup_selected);
+                                if (R_SUCCEEDED(rc)) {
+                                    add_alert("Save restored; previous data backed up.");
+                                    save_backup_list_save = -1;
+                                }
                                 else { snprintf(popup_text, sizeof(popup_text), "Restore failed: %08X", (unsigned)rc); popup_type = POPUP_INFO; popup_active = true; popup_start_tick = armGetSystemTick(); }
                             }
+                            save_action_handled = true;
+                        } else if (mx >= 900 && mx <= 1110) {
+                            int backup_count = save_manager_backup_count(save_manager_selected);
+                            if (backup_count > 0) save_backup_selected = (save_backup_selected + 1) % backup_count;
+                            save_restore_confirm = false;
+                            save_action_handled = true;
                         }
                     }
-                    continue;
+                    if (save_action_handled) continue;
                 }
-                if (mx >= 40 && mx <= 620 && my >= 790 - tools_scroll && my <= 1010 - tools_scroll) {
+                if (mx >= 40 && mx <= 620 && my >= 790 - tools_scroll && my <= 970 - tools_scroll) {
                     Result rc = fan_service_start();
                     if (R_SUCCEEDED(rc)) {
                         popup_fan_val = fan_manual_active ? fan_requested_pct : 45;
@@ -7667,8 +9163,17 @@ int main(int argc, char *argv[]) {
                     int bx = 690 + i * 180;
                     if (mx >= bx && mx <= bx + 170 && my >= mod_y && my <= mod_y + 30) {
                         if (i == 0) app_mode = 0;
+                        else if (i == 1) {
+                            overlay_status = detect_ultrahand_overlay();
+                            snprintf(popup_text, sizeof(popup_text), "%s",
+                                overlay_status_text(overlay_status));
+                            popup_type = POPUP_INFO;
+                            popup_active = true;
+                            popup_start_tick = armGetSystemTick();
+                        }
                         else {
-                            snprintf(popup_text, sizeof(popup_text), "%s", i == 1 ? s_overlay_desc[cur_lang] : s_sysmodule_desc[cur_lang]);
+                            snprintf(popup_text, sizeof(popup_text), "%s",
+                                s_sysmodule_desc[cur_lang]);
                             popup_type = POPUP_INFO;
                             popup_active = true;
                             popup_start_tick = armGetSystemTick();
@@ -7702,11 +9207,6 @@ int main(int argc, char *argv[]) {
                     }
                 }
 
-                // Screenshot button
-                if (mx >= 690 && mx <= 930 && my >= 1080 - tools_scroll && my <= 1120 - tools_scroll) {
-                    capture_screenshot(renderer);
-                }
-
                 // SD Speed Test button: y=1690-sc
                 int sd_btn_y = 1910 - tools_scroll;
                 if (mx >= 690 && mx <= 930 && my >= sd_btn_y && my <= sd_btn_y + 36) {
@@ -7722,12 +9222,6 @@ int main(int argc, char *argv[]) {
                 }
             }
 
-            if (cur == 4 && ev_down) {
-                int screenshot_y = 858 - perf_scroll;
-                if (mx >= 930 && mx <= 1180 && my >= screenshot_y && my <= screenshot_y + 48)
-                    capture_screenshot(renderer);
-            }
-
             // Floating refresh button
             if (cur != 6 && ev_down) {
                 int dx = mx - (W - 70 + 25), dy = my - (148 + 25);
@@ -7738,6 +9232,63 @@ int main(int argc, char *argv[]) {
             if (cur == 1 && !fb_active && ev_down) {
                 int sd_test_y = storage_test_btn_y - storage_scroll;
                 int fb_btn_y = storage_fb_btn_y - storage_scroll;
+                int scan_btn_y = storage_scan_button_y - storage_scroll;
+                if (mx >= 1000 && mx <= 1210 && my >= scan_btn_y && my <= scan_btn_y + 34) {
+                    storage_scan_start();
+                    continue;
+                }
+                mutexLock(&storage_scan_mutex);
+                bool scan_complete = storage_scan_state == STORAGE_SCAN_COMPLETE;
+                mutexUnlock(&storage_scan_mutex);
+                if (scan_complete) {
+                    bool category_touched = false;
+                    for (int i = 0; i < STORAGE_CATEGORY_COUNT; i++) {
+                        int row_y = storage_scan_category_y + i * 27 - storage_scroll;
+                        if (mx >= 60 && mx <= 1220 && my >= row_y - 2 && my <= row_y + 22) {
+                            if (storage_scan_detail_category == i)
+                                storage_scan_detail_ascending = !storage_scan_detail_ascending;
+                            else {
+                                storage_scan_detail_category = i;
+                                storage_scan_detail_ascending = false;
+                            }
+                            category_touched = true;
+                            break;
+                        }
+                    }
+                    if (category_touched) continue;
+
+                    int detail_y = storage_scan_details_y + 27 - storage_scroll;
+                    bool detail_opened = false;
+                    for (int i = 0; i < 5; i++) {
+                        int row_y = detail_y + i * 20;
+                        if (mx < 70 || mx > 1210 || my < row_y - 2 || my > row_y + 18) continue;
+                        int category = storage_scan_detail_category;
+                        if (category < 0 || category >= STORAGE_CATEGORY_COUNT) break;
+                        int count = storage_scan_category_entries[category];
+                        if (i >= count) break;
+                        int order = storage_scan_detail_ascending ? count - 1 - i : i;
+                        int entry_index = storage_scan_sorted_indices[category][order];
+                        StorageScanEntry selected = storage_scan_entries[entry_index];
+                        if (selected.is_dir) {
+                            char path[512];
+                            snprintf(path, sizeof(path), "sdmc:/%.255s", selected.name);
+                            fb_open(path);
+                        } else {
+                            fb_open("sdmc:/");
+                            for (int j = 0; j < fb_count; j++) {
+                                if (strcmp(fb_entries[j], selected.name) == 0) {
+                                    fb_selected = j;
+                                    if (fb_selected >= fb_scroll + 15) fb_scroll = fb_selected - 14;
+                                    break;
+                                }
+                            }
+                        }
+                        fb_mode = FB_MODE_BROWSE;
+                        detail_opened = true;
+                        break;
+                    }
+                    if (detail_opened) continue;
+                }
                 if (my >= fb_btn_y && my <= fb_btn_y + 40 && mx >= 690 && mx <= 950) {
                     fb_open("sdmc:/"); fb_mode = FB_MODE_BROWSE;
                 }
@@ -7755,7 +9306,37 @@ int main(int argc, char *argv[]) {
                 }
             }
             // Storage page: tap file browser entry (full-screen)
-            if (cur == 1 && fb_active && ev_down && my >= 222 && my <= 640 && mx >= 40 && mx <= 1240) {
+            if (cur == 1 && fb_active && ev_down && fb_mode == FB_MODE_BROWSE &&
+                my >= 198 && my <= 220 &&
+                mx >= 860 && mx <= 1220) {
+                int previous_sort_mode = fb_sort_mode;
+                fb_sort_mode = (fb_sort_mode + 1) % 3;
+                if (fb_sort_entries()) {
+                    fb_scroll = 0;
+                } else {
+                    fb_sort_mode = previous_sort_mode;
+                    snprintf(fb_status_msg, sizeof(fb_status_msg), "Not enough memory to sort files.");
+                    fb_status_tick = armGetSystemTick();
+                }
+            }
+            if (cur == 1 && fb_active && ev_down && fb_mode == FB_MODE_CONFIRM_DELETE) {
+                if (mx >= 790 && mx <= 960 && my >= 674 && my <= 708) {
+                    fb_delete_selected();
+                } else if (mx >= 980 && mx <= 1150 && my >= 674 && my <= 708) {
+                    fb_mode = FB_MODE_BROWSE;
+                }
+            }
+            if (cur == 1 && fb_active && ev_down && fb_mode == FB_MODE_RENAME) {
+                if (mx >= 750 && mx <= 900 && my >= 684 && my <= 714) {
+                    if (fb_rename_buf[0]) fb_rename_selected(fb_rename_buf);
+                } else if (mx >= 920 && mx <= 1070 && my >= 684 && my <= 714) {
+                    fb_mode = FB_MODE_BROWSE;
+                    fb_rename_buf[0] = 0;
+                    fb_rename_cursor = 0;
+                }
+            }
+            if (cur == 1 && fb_active && ev_down && fb_mode == FB_MODE_BROWSE &&
+                my >= 222 && my <= 640 && mx >= 40 && mx <= 1240) {
                 int tap_idx = (my - 222) / 26 + fb_scroll;
                 if (tap_idx >= 0 && tap_idx < fb_count) {
                     fb_selected = tap_idx;
@@ -7773,10 +9354,31 @@ int main(int argc, char *argv[]) {
             // Scrollable pages touch scroll
             int scroll_max = (cur == 0) ? system_scroll_max : (cur == 2) ? net_scroll_max : (cur == 4) ? perf_scroll_max : (cur == 5) ? ctrl_scroll_max : (cur == 7) ? about_scroll_max : (cur == 6) ? tools_scroll_max : (cur == 1) ? storage_scroll_max : (cur == 8) ? settings_scroll_max : 0;
             int *scroll_var = (cur == 0) ? &system_scroll : (cur == 2) ? &net_scroll : (cur == 4) ? &perf_scroll : (cur == 5) ? &ctrl_scroll : (cur == 7) ? &about_scroll : (cur == 6) ? &tools_scroll : (cur == 1) ? &storage_scroll : (cur == 8) ? &settings_scroll : NULL;
+            if (cur == 1 && fb_active) scroll_var = NULL;
             if (scroll_var && scroll_max > 0) {
-                if (ev_down)
+                if (ev_down) {
                     touch_start_y = my;
-                else if (ev_move) {
+                    touch_scroll_active = my >= 140 && my <= 650;
+                    int save_action_y = 2180 - tools_scroll;
+                    bool save_button_touched = my >= save_action_y && my <= save_action_y + 44 &&
+                        ((mx >= 70 && mx <= 170) || (mx >= 180 && mx <= 280) ||
+                         (mx >= 310 && mx <= 560) || (mx >= 580 && mx <= 880) ||
+                         (mx >= 900 && mx <= 1110));
+                    touch_scroll_blocked = cur == 6 && save_manager_count() > 0 && save_button_touched;
+                    if (cur == 1) {
+                        int scan_button_y = storage_scan_button_y - storage_scroll;
+                        bool analyzer_button = mx >= 1000 && mx <= 1210 &&
+                            my >= scan_button_y && my <= scan_button_y + 34;
+                        bool analyzer_row = mx >= 60 && mx <= 1220 &&
+                            my >= storage_scan_category_y - storage_scroll - 2 &&
+                            my <= storage_scan_category_y + STORAGE_CATEGORY_COUNT * 27 - storage_scroll + 22;
+                        touch_scroll_blocked = touch_scroll_blocked || fb_active ||
+                            analyzer_button || analyzer_row;
+                        if (analyzer_button || analyzer_row || fb_active)
+                            touch_scroll_active = false;
+                    }
+                    if (touch_scroll_blocked) touch_scroll_active = false;
+                } else if (ev_move && touch_scroll_active && !touch_scroll_blocked) {
                     int dy = touch_start_y - my;
                     if (dy > 4 || dy < -4) {
                         *scroll_var += dy;
@@ -7790,6 +9392,12 @@ int main(int argc, char *argv[]) {
             // Settings page: touch for language/theme/refresh selection
             if (cur == 8 && ev_down) {
                 int ssc = settings_scroll;
+                if (mx >= 70 && mx <= 460 && my >= 900 - ssc && my <= 940 - ssc) {
+                    tutorial_step = 0;
+                    tutorial_write_failed = false;
+                    tutorial_active = true;
+                    continue;
+                }
                 // Language buttons (2 rows)
                 if (my >= 246 - ssc && my <= 326 - ssc) {
                     int lang_per_row = (LANG_MAX + 1) / 2;
@@ -7831,17 +9439,45 @@ int main(int argc, char *argv[]) {
                 if (my >= ref_ys - ssc && my <= ref_ys + 36 - ssc) {
                     static const int rv[] = {0,1,3,5,10};
                     for (int i = 0; i < 5; i++) {
-                        int bx = 690 + i * 104;
-                        if (mx >= bx && mx <= bx + 100) {
+                        int bx = 70 + i * 112;
+                        if (mx >= bx && mx <= bx + 104) {
                             auto_refresh_interval = rv[i];
+                            settings_sel = 2;
                             save_config();
                             break;
                         }
                     }
                 }
+                int temp_alert_y = ref_ys + 100 - ssc;
+                if (my >= temp_alert_y && my <= temp_alert_y + 36 &&
+                    ((mx >= 80 && mx <= 114) || (mx >= 226 && mx <= 260))) {
+                    settings_sel = 3;
+                    if (mx < 170) {
+                        if (temp_alert_millic > 30000) temp_alert_millic -= 5000;
+                    } else if (temp_alert_millic < 90000) {
+                        temp_alert_millic += 5000;
+                    }
+                    save_config();
+                }
+                int mem_alert_y = ref_ys + 188 - ssc;
+                if (my >= mem_alert_y && my <= mem_alert_y + 36 &&
+                    ((mx >= 80 && mx <= 114) || (mx >= 226 && mx <= 260))) {
+                    settings_sel = 4;
+                    if (mx < 170) {
+                        if (mem_alert_frac > 0.5f) mem_alert_frac -= 0.05f;
+                    } else if (mem_alert_frac < 0.95f) {
+                        mem_alert_frac += 0.05f;
+                    }
+                    save_config();
+                }
                 // Custom theme editor touch (new layout coordinates)
                 if (custom_theme_editing) {
-                    int cte_cy = 145;
+                    for (int i = 0; i < 3; i++) {
+                        int px = 110 + i * 365;
+                        if (mx >= px && mx <= px + 340 && my >= 138 && my <= 168)
+                            apply_custom_theme_palette(i);
+                    }
+                    int cte_cy = 177;
                     for (int i = 0; i < 10; i++) {
                         int row = i / 2;
                         int col = i % 2;
@@ -8055,11 +9691,6 @@ int main(int argc, char *argv[]) {
         if (cur != 8) {
             if (down & HidNpadButton_L) cur = (cur - 1 + PGS) % PGS;
             if (down & HidNpadButton_R) cur = (cur + 1) % PGS;
-        }
-
-        // Screenshot: ZL+ZR anywhere
-        if ((down & HidNpadButton_ZL) && (down & HidNpadButton_ZR) && cur != 6) {
-            capture_screenshot(renderer);
         }
 
         // Scan installed games and processes on Tools page access
@@ -8507,6 +10138,18 @@ int main(int argc, char *argv[]) {
                 SDL_RenderFillRect(renderer, &bl_rect);
                 SDL_SetRenderDrawBlendMode(renderer, SDL_BLENDMODE_NONE);
             }
+            if (tesla_guide_active) draw_tesla_guide(renderer);
+            if (tutorial_active) draw_tutorial(renderer);
+            if (!screen_test_active) {
+                filledCircleRGBA(renderer, ui_cursor_x, ui_cursor_y, 22,
+                    color_cyan.r, color_cyan.g, color_cyan.b, 28);
+                circleRGBA(renderer, ui_cursor_x, ui_cursor_y, 19,
+                    color_cyan.r, color_cyan.g, color_cyan.b, 255);
+                circleRGBA(renderer, ui_cursor_x, ui_cursor_y, 15,
+                    color_white.r, color_white.g, color_white.b, 190);
+                filledCircleRGBA(renderer, ui_cursor_x, ui_cursor_y, 3,
+                    color_cyan.r, color_cyan.g, color_cyan.b, 255);
+            }
         }
 
         SDL_RenderPresent(renderer);
@@ -8526,6 +10169,7 @@ exit_app:
             hidStopSixAxisSensor(sixaxis_handles[1]);
     }
     net_test_cleanup();
+    storage_scan_cleanup();
     vibration_stop(0);
     vibration_stop(1);
     if (vibe_session_started) hidEndPermitVibrationSession();

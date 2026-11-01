@@ -2,6 +2,7 @@
 
 #include <dirent.h>
 #include <errno.h>
+#include <climits>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -11,6 +12,15 @@
 
 static FsSaveDataInfo g_saves[256];
 static int g_save_count;
+#define SAVE_BACKUP_MAX 256
+struct SaveBackupEntry {
+    char path[FS_MAX_PATH];
+    u64 timestamp;
+    unsigned long long key;
+};
+static SaveBackupEntry g_backups[SAVE_BACKUP_MAX];
+static int g_backup_count;
+static int g_backup_save_index = -1;
 static const char *g_mount = "svm";
 // Reused by the recursive copy routine: a 64 KiB local buffer in every
 // directory frame could exhaust the Switch application's stack on deep saves.
@@ -111,6 +121,53 @@ static bool snapshot_complete(const char *snapshot) {
     return stat(marker, &st) == 0 && S_ISREG(st.st_mode);
 }
 
+static bool parse_backup_name(const char *name, u64 *timestamp, unsigned long long *key) {
+    if (!name || name[0] < '0' || name[0] > '9') return false;
+    char *end = NULL;
+    errno = 0;
+    unsigned long long stamp = strtoull(name, &end, 10);
+    if (errno || end == name || !end || *end != '-' || stamp > ULLONG_MAX / 100) return false;
+    errno = 0;
+    char *suffix_end = NULL;
+    long suffix = strtol(end + 1, &suffix_end, 10);
+    if (errno || suffix_end == end + 1 || !suffix_end || *suffix_end || suffix < 0 || suffix > 99)
+        return false;
+    if (timestamp) *timestamp = (u64)stamp;
+    if (key) *key = stamp * 100 + (unsigned long long)suffix;
+    return true;
+}
+
+static void invalidate_backups(void) {
+    g_backup_count = 0;
+    g_backup_save_index = -1;
+}
+
+static bool find_latest_backup(const char *parent, const char *exclude,
+    char *out, size_t out_size) {
+    DIR *dir = opendir(parent);
+    if (!dir) return false;
+    bool found = false;
+    unsigned long long best = 0;
+    struct dirent *ent;
+    while ((ent = readdir(dir)) != NULL) {
+        u64 timestamp = 0;
+        unsigned long long key = 0;
+        char candidate[FS_MAX_PATH];
+        if (!parse_backup_name(ent->d_name, &timestamp, &key) ||
+            !path_join(candidate, sizeof(candidate), parent, ent->d_name) ||
+            (exclude && !strcmp(candidate, exclude)) ||
+            !path_is_dir(candidate) || !snapshot_complete(candidate) || (found && key <= best))
+            continue;
+        size_t len = strnlen(candidate, sizeof(candidate));
+        if (len >= out_size) continue;
+        memcpy(out, candidate, len + 1);
+        best = key;
+        found = true;
+    }
+    closedir(dir);
+    return found;
+}
+
 static Result mount_record(const FsSaveDataInfo *info) {
     return fsdevMountSaveData(g_mount, info->application_id, info->uid);
 }
@@ -119,6 +176,7 @@ static void unmount_record(void) { fsdevUnmountDevice(g_mount); }
 
 extern "C" Result save_manager_refresh(void) {
     g_save_count = 0;
+    invalidate_backups();
     FsSaveDataInfoReader reader;
     Result rc = fsOpenSaveDataInfoReader(&reader, FsSaveDataSpaceId_User);
     if (R_FAILED(rc)) return rc;
@@ -177,57 +235,81 @@ extern "C" Result save_manager_backup(int index) {
         }
     }
     unmount_record();
+    if (R_SUCCEEDED(rc)) invalidate_backups();
     return rc;
 }
 
-extern "C" Result save_manager_restore_latest(int index) {
+extern "C" Result save_manager_refresh_backups(int index) {
     if (index < 0 || index >= g_save_count) return MAKERESULT(Module_Libnx, LibnxError_BadInput);
-    const FsSaveDataInfo *info = &g_saves[index];
-    char base[FS_MAX_PATH], parent[FS_MAX_PATH], newest[FS_MAX_PATH];
-    save_paths(info, base, sizeof(base), parent, sizeof(parent));
+    invalidate_backups();
+    char base[FS_MAX_PATH], parent[FS_MAX_PATH];
+    save_paths(&g_saves[index], base, sizeof(base), parent, sizeof(parent));
     DIR *dir = opendir(parent);
-    if (!dir) return MAKERESULT(Module_Libnx, LibnxError_NotFound);
-    unsigned long long best = 0;
+    if (!dir) {
+        if (errno == ENOENT) {
+            g_backup_save_index = index;
+            return 0;
+        }
+        return MAKERESULT(Module_Libnx, LibnxError_NotFound);
+    }
     struct dirent *ent;
     while ((ent = readdir(dir)) != NULL) {
-        char *end = NULL;
-        unsigned long long stamp = strtoull(ent->d_name, &end, 10);
-        int suffix = end && *end == '-' ? atoi(end + 1) : -1;
-        unsigned long long key = stamp * 100 + (suffix >= 0 ? (unsigned)suffix : 0);
-        if (end && *end == '-' && key >= best) {
-            char candidate[FS_MAX_PATH];
-            if (path_join(candidate, sizeof(candidate), parent, ent->d_name) && path_is_dir(candidate) && snapshot_complete(candidate)) { best = key; snprintf(newest, sizeof(newest), "%s", candidate); }
+        u64 timestamp = 0;
+        unsigned long long key = 0;
+        char candidate[FS_MAX_PATH];
+        if (!parse_backup_name(ent->d_name, &timestamp, &key) ||
+            !path_join(candidate, sizeof(candidate), parent, ent->d_name) ||
+            !path_is_dir(candidate) || !snapshot_complete(candidate)) continue;
+        int pos = g_backup_count;
+        if (pos == SAVE_BACKUP_MAX && key <= g_backups[pos - 1].key) continue;
+        if (pos < SAVE_BACKUP_MAX) g_backup_count++;
+        else pos--;
+        while (pos > 0 && g_backups[pos - 1].key < key) {
+            g_backups[pos] = g_backups[pos - 1];
+            pos--;
         }
+        size_t len = strnlen(candidate, sizeof(candidate));
+        if (len >= sizeof(g_backups[pos].path)) continue;
+        memcpy(g_backups[pos].path, candidate, len + 1);
+        g_backups[pos].timestamp = timestamp;
+        g_backups[pos].key = key;
     }
     closedir(dir);
-    if (!best) return MAKERESULT(Module_Libnx, LibnxError_NotFound);
+    g_backup_save_index = index;
+    return 0;
+}
 
-    // Always preserve the live save first. This snapshot is also the rollback source.
+extern "C" int save_manager_backup_count(int index) {
+    return index == g_backup_save_index ? g_backup_count : 0;
+}
+
+extern "C" Result save_manager_get_backup_timestamp(int index, int backup_index, u64 *timestamp) {
+    if (index != g_backup_save_index || backup_index < 0 || backup_index >= g_backup_count || !timestamp)
+        return MAKERESULT(Module_Libnx, LibnxError_BadInput);
+    *timestamp = g_backups[backup_index].timestamp;
+    return 0;
+}
+
+extern "C" Result save_manager_restore_backup(int index, int backup_index) {
+    if (index < 0 || index >= g_save_count || index != g_backup_save_index ||
+        backup_index < 0 || backup_index >= g_backup_count)
+        return MAKERESULT(Module_Libnx, LibnxError_BadInput);
+    const FsSaveDataInfo *info = &g_saves[index];
+    char target[FS_MAX_PATH], base[FS_MAX_PATH], parent[FS_MAX_PATH], rollback[FS_MAX_PATH];
+    size_t target_len = strnlen(g_backups[backup_index].path, sizeof(target));
+    if (target_len >= sizeof(target)) return MAKERESULT(Module_Libnx, LibnxError_BadInput);
+    memcpy(target, g_backups[backup_index].path, target_len + 1);
+    save_paths(info, base, sizeof(base), parent, sizeof(parent));
+
+    // Keep a fresh copy of the live save before restoring the selected snapshot.
     Result rc = save_manager_backup(index);
     if (R_FAILED(rc)) return rc;
-    dir = opendir(parent);
-    if (!dir) return MAKERESULT(Module_Libnx, LibnxError_NotFound);
-    char rollback[FS_MAX_PATH] = {0}; best = 0;
-    while ((ent = readdir(dir)) != NULL) {
-        char *end = NULL;
-        unsigned long long stamp = strtoull(ent->d_name, &end, 10);
-        int suffix = end && *end == '-' ? atoi(end + 1) : -1;
-        unsigned long long key = stamp * 100 + (suffix >= 0 ? (unsigned)suffix : 0);
-        char candidate[FS_MAX_PATH];
-        if (end && *end == '-') {
-            if (!path_join(candidate, sizeof(candidate), parent, ent->d_name)) continue;
-            if (path_is_dir(candidate) && snapshot_complete(candidate) && key >= best && strcmp(candidate, newest)) {
-                best = key; snprintf(rollback, sizeof(rollback), "%s", candidate);
-            }
-        }
-    }
-    closedir(dir);
-    if (!rollback[0]) return MAKERESULT(Module_Libnx, LibnxError_NotFound);
-
+    if (!find_latest_backup(parent, target, rollback, sizeof(rollback)))
+        return MAKERESULT(Module_Libnx, LibnxError_NotFound);
     rc = mount_record(info);
     if (R_FAILED(rc)) return rc;
     rc = clear_tree("svm:/");
-    if (R_SUCCEEDED(rc)) rc = copy_tree(newest, "svm:/");
+    if (R_SUCCEEDED(rc)) rc = copy_tree(target, "svm:/");
     if (R_SUCCEEDED(rc)) rc = fsdevCommitDevice(g_mount);
     if (R_FAILED(rc)) {
         clear_tree("svm:/");
@@ -235,5 +317,13 @@ extern "C" Result save_manager_restore_latest(int index) {
         fsdevCommitDevice(g_mount);
     }
     unmount_record();
+    invalidate_backups();
     return rc;
+}
+
+extern "C" Result save_manager_restore_latest(int index) {
+    Result rc = save_manager_refresh_backups(index);
+    if (R_FAILED(rc)) return rc;
+    if (!save_manager_backup_count(index)) return MAKERESULT(Module_Libnx, LibnxError_NotFound);
+    return save_manager_restore_backup(index, 0);
 }

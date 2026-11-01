@@ -4,7 +4,7 @@ INCLUDES	:=	include include/mtp
 
 TITLE		:=	Switch Info NX
 AUTHOR		:=	dodosi
-VERSION		:=	0.4
+VERSION		:=	0.5
 
 ICON		:=	icon.jpg
 
@@ -57,9 +57,15 @@ else
 LD	:=	$(CXX)
 endif
 
-.PHONY: all clean icon
+.PHONY: all clean icon overlay sysmodule
 
-all: $(TARGET).nro
+all: $(TARGET).nro overlay
+
+overlay:
+	$(MAKE) -C overlay
+
+sysmodule:
+	$(MAKE) -C network_sysmodule
 
 icon:
 	@bash tools/make_icon.sh
@@ -88,7 +94,7 @@ $(BUILD)/mtp_%.o: source/mtp/%.s | $(BUILD)
 $(TARGET).elf: $(OBJS)
 	$(LD) $(LDFLAGS) $(OBJS) $(LIBDIRS) $(LIBS) -o "$@"
 
-$(NACP):
+$(NACP): Makefile
 	$(NACPTOOL) --create "$(TITLE)" "$(AUTHOR)" "$(VERSION)" "$@"
 
 $(TARGET).nro: $(TARGET).elf $(NACP) $(ICON)
