@@ -20,53 +20,6 @@ SwitchInfoNX is a feature-rich homebrew application that turns your Nintendo Swi
 
 ---
 
-## ✨ Features (v0.5)
-
-###  System Information & Deep Hardware
-* **Firmware & Hardware**: Firmware version, serial number, hardware type (Erista V1 / Mariko V2 / Switch Lite / Switch OLED), region, system language, device nickname.
-* **Environment Detection**: Real-time detection of **EmuMMC (Active)** vs **SysNAND**.
-* **Battery Health Diagnostics**: Live battery percentage, charging state, **Battery Health %** estimation, raw voltage in **mV**, and real-time charge/discharge current (**mA**).
-* **Thermal Monitoring**: Skin & SoC internal temperature readings, dynamic color coding (Normal / Warm / Hot), thermal threshold alerts.
-* **Battery Condition**: Battery health estimate displayed with a clear condition gauge alongside charge and discharge readings.
-
-###  Storage & File Browser
-* **Storage Insights**: SD card usage, NAND partitions (USER / SYSTEM / SAFE), SD read speed test benchmark.
-* **Integrated File Browser**: Full SD card file manager with unified byte calculations (B/KB/MB/GB), folder navigation, name/size sorting, copy/cut/paste, rename, and file deletion.
-* **SD Space Analyzer**: Start a manual scan to see progress and a size breakdown for Nintendo, homebrew, CFW/configuration, media, and other files. Results stay cached in memory until the next scan; tap a category to sort its largest root entries and open them in the file browser. Nintendo content is reported as an aggregate, not as reliable per-game sizes.
-* **File Details**: The browser shows the selected item's name, type, and file size in its footer; folders can be opened to inspect their contents.
-* **Game Save Backups**: Create dated snapshots and choose a specific snapshot to restore, with a safety backup made first.
-
-### 🌐 Network & Latency Diagnostics
-* **Network Status**: IP & MAC addresses, connection type, SSID, Wi-Fi signal strength history graph with one-second samples and a 60-second timeline, plus ping history for the last 20 speed tests.
-* **Speed & Latency**: Real-time latency measurement (**ping in ms** to public DNS), download/upload throughput test.
-* **Live Network Traffic**: One-second receive/send rates, session totals, and a 60-second history graph from active system interfaces; these counters cover system traffic, not only SwitchInfoNX.
-* **Native Ultrahand Status Overlay**: A separate Ultrahand-native `.ovl` with live SoC/PCB temperatures, battery percentage, network RX/TX rates, per-session totals, a 60-second graph, connection type, signal strength, IP address, session reset, and CSV export to SD.
-
-###  Performance & Hardware Gauges
-* **Live Clock Speeds**: Real-time CPU, GPU, and EMC memory clock frequencies.
-* **Performance Graphs**: 60-second live FPS and temperature charts with rolling minimum, average, and maximum summaries, RAM usage gauge, and CPU/GPU load score.
-* **Clock Scaling Controls**: Manual CPU/GPU clock target adjustment sliders.
-
-###  Controller Diagnostics & Stick Drift Detector
-* **Interactive Controller Test**: Live button state mapping, analog trigger visualization, gyroscope & accelerometer 6-axis readout.
-* **Stick Drift & Deadzone Visualizer**: Circular analog stick bounds, a center reference, drift deviation percentage, and guidance to release the sticks during a drift check.
-
-###  Transfer Protocols
-* **MTP USB Transfer**: Built-in Media Transfer Protocol server over USB for high-speed drag-and-drop file transfers with PC.
-* **Wi-Fi FTP Server**: Dual-mode FTP / FTPD server with compatible command handling, reliable uploads and folder creation, tuned transfer buffers, and live progress / speed feedback on the Switch.
-* **Transfer Estimates**: Active transfers with a known size show an estimated time remaining based on observed progress.
-
-### 🎨 Modern UI & Custom Themes
-* **Modern Dashboard**: Sleek pill-based navigation tab bar, section-colored cards, continuous vertical scrollbars, and floating translucent toast alerts.
-* **17 Built-in Presets**: Including **OLED Pure Black** (true black `#000000` power-saving mode) and **Cyberpunk Neon**, plus a full 10-slot real-time RGB custom theme editor.
-* **Theme Preview**: Settings includes a live sample of the selected theme's background, card, border, and accent colors.
-* **Quick Theme Palettes**: The custom editor includes Ocean, Sunset, and Forest starting palettes, with touch-friendly save/cancel buttons.
-* **Stick Cursor Navigation**: Move a visible blue pointer with either analog stick and press **A** to activate controls across pages and dialogs; touch remains supported.
-* **First-Run Tutorial**: A five-step introduction appears on first launch, is tracked in `tutorial.json` (`"tuto": false/true`), and can be reopened from Settings. Tutorial text and controls are localized in all 11 supported languages.
-* **Ultrahand Overlay Setup Guide**: A five-step guide in Tools explains installing Ultrahand, obtaining the `.ovl`, transferring it with MTP/FTPD, and copying it to `/switch/.overlays/`.
-* **Internationalization**: 11 languages supported (English, French, Italian, Spanish, German, Portuguese, Dutch, Japanese, Russian, Chinese, Korean).
-
----
 
 ##  Installation
 
