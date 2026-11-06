@@ -3,7 +3,7 @@
   <h1>SwitchInfoNX</h1>
   <p><strong>Premium system information & hardware diagnostic utility for Nintendo Switch homebrew</strong></p>
   <p>
-    <img src="https://img.shields.io/badge/version-0.5-blue?style=flat-square"/>
+    <img src="https://img.shields.io/badge/version-0.6-blue?style=flat-square"/>
     <img src="https://img.shields.io/badge/platform-Nintendo%20Switch-e60012?style=flat-square"/>
     <img src="https://img.shields.io/badge/build-devkitPro%20A64-40aef0?style=flat-square"/>
   </p>
@@ -16,42 +16,46 @@
 > All-in-one hardware monitor, diagnostics, system info & file transfer tool for the Nintendo Switch.
 
 **Long description:**  
-SwitchInfoNX is a feature-rich homebrew application that turns your Nintendo Switch into a diagnostics workstation. It provides a real-time overview of CPU/GPU/memory clocks, FPS, RAM & storage space, thermal readings, Joy-Con drift diagnostics, network latency, MTP & FTP transfer servers, and hardware detection (EmuMMC/SysNAND, battery health & voltages).
+SwitchInfoNX is a homebrew utility for viewing Nintendo Switch system information, clock readings, application frame-loop rate, process memory, storage, temperatures, controller input, network measurements, and MTP/FTP transfers.
 
 ---
 
-## ✨ Features (v0.5)
+## ✨ Features (v0.6)
 
 ###  System Information & Deep Hardware
 * **Firmware & Hardware**: Firmware version, serial number, hardware type (Erista V1 / Mariko V2 / Switch Lite / Switch OLED), region, system language, device nickname.
-* **Environment Detection**: Real-time detection of **EmuMMC (Active)** vs **SysNAND**.
-* **Battery Health Diagnostics**: Live battery percentage, charging state, **Battery Health %** estimation, raw voltage in **mV**, and real-time charge/discharge current (**mA**).
+* **EmuMMC Configuration Hint**: Reports whether an EmuMMC configuration file or folder is present on the SD card. This is not proof of which NAND is currently active.
+* **Battery Diagnostics**: Live battery percentage, charging state, estimated battery health, raw voltage in **mV**, and estimated average charge/discharge current (**mA**) derived from battery percentage changes (not an instantaneous current sensor). Battery-side power is also an estimate, not a direct power measurement.
 * **Thermal Monitoring**: Skin & SoC internal temperature readings, dynamic color coding (Normal / Warm / Hot), thermal threshold alerts.
 * **Battery Condition**: Battery health estimate displayed with a clear condition gauge alongside charge and discharge readings.
 
 ###  Storage & File Browser
-* **Storage Insights**: SD card usage, NAND partitions (USER / SYSTEM / SAFE), SD read speed test benchmark.
+* **Storage Insights**: SD card usage and USER/SYSTEM NAND partition usage. The 16 MB write/read-back test reports cached read-back throughput; it is not a physical SD-card speed benchmark.
 * **Integrated File Browser**: Full SD card file manager with unified byte calculations (B/KB/MB/GB), folder navigation, name/size sorting, copy/cut/paste, rename, and file deletion.
 * **SD Space Analyzer**: Start a manual scan to see progress and a size breakdown for Nintendo, homebrew, CFW/configuration, media, and other files. Results stay cached in memory until the next scan; tap a category to sort its largest root entries and open them in the file browser. Nintendo content is reported as an aggregate, not as reliable per-game sizes.
 * **File Details**: The browser shows the selected item's name, type, and file size in its footer; folders can be opened to inspect their contents.
 * **Game Save Backups**: Create dated snapshots and choose a specific snapshot to restore, with a safety backup made first.
 
 ### 🌐 Network & Latency Diagnostics
-* **Network Status**: IP & MAC addresses, connection type, SSID, Wi-Fi signal strength history graph with one-second samples and a 60-second timeline, plus ping history for the last 20 speed tests.
-* **Speed & Latency**: Real-time latency measurement (**ping in ms** to public DNS), download/upload throughput test.
+* **Network Status**: IP & MAC addresses, connection type, SSID, Wi-Fi signal-strength samples, and the last 20 TCP connection-time test results.
+* **Speed & Latency**: Download/upload throughput tests and the average time for two TCP connections to a Nintendo test endpoint on port 80. This is not ICMP ping; the displayed range is based on those same two attempts.
 * **Live Network Traffic**: One-second receive/send rates, session totals, and a 60-second history graph from active system interfaces; these counters cover system traffic, not only SwitchInfoNX.
 * **Native Ultrahand Status Overlay**: A separate Ultrahand-native `.ovl` with live SoC/PCB temperatures, battery percentage, network RX/TX rates, per-session totals, a 60-second graph, connection type, signal strength, IP address, session reset, and CSV export to SD.
 
 ###  Performance & Hardware Gauges
 * **Live Clock Speeds**: Real-time CPU, GPU, and EMC memory clock frequencies.
-* **Performance Graphs**: 60-second live FPS and temperature charts with rolling minimum, average, and maximum summaries, RAM usage gauge, and CPU/GPU load score.
-* **Clock Scaling Controls**: Manual CPU/GPU clock target adjustment sliders.
+* **Performance Graphs**: The app's own loop rate and temperature samples, plus rolling minimum/average/maximum loop-rate summaries. The frame-rate counter does not measure a running game's FPS. The memory gauge reports this process's memory, not total system RAM.
+* **Clock Scaling Controls**: Touch-adjustable CPU/GPU clock sliders in Tools, rounded to clock rates supported by the console. The screen reports failures instead of silently ignoring them.
+* **Installed Titles**: Browse installed application titles from the Tools page; the scanner is capped at 64 titles.
+* **Performance Export**: Touch the Export CSV button on Perf or press **Y** to append a snapshot to `sdmc:/switch/SwitchInfoNX/perf_metrics_v06.csv`. FPS is the app loop rate, memory fields are process memory, and unavailable battery or game-card status fields are `-1`.
+* **Fan Control Feedback**: Tools identifies the fan card as touchable, shows the controller-reported level, and explains that thermal protections may override the selected target.
 
-###  Controller Diagnostics & Stick Drift Detector
+###  Controller Diagnostics
 * **Interactive Controller Test**: Live button state mapping, analog trigger visualization, gyroscope & accelerometer 6-axis readout.
-* **Stick Drift & Deadzone Visualizer**: Circular analog stick bounds, a center reference, drift deviation percentage, and guidance to release the sticks during a drift check.
+* **Stick Position Display**: Live stick coordinates and a center reference. This is not a drift diagnosis or a calibrated deadzone test; release the sticks to inspect their resting position.
 
 ###  Transfer Protocols
+* **FTP and MTP File Transfer**: The Transfer page shows the Wi-Fi FTP and USB MTP controls together. Use either protocol to browse the SD card and copy files, including NSP/NSZ/XCI/XCZ packages as ordinary files. SwitchInfoNX does not install game packages.
 * **MTP USB Transfer**: Built-in Media Transfer Protocol server over USB for high-speed drag-and-drop file transfers with PC.
 * **Wi-Fi FTP Server**: Dual-mode FTP / FTPD server with compatible command handling, reliable uploads and folder creation, tuned transfer buffers, and live progress / speed feedback on the Switch.
 * **Transfer Estimates**: Active transfers with a known size show an estimated time remaining based on observed progress.
@@ -125,7 +129,7 @@ The optional Atmosphere network-counter sysmodule is not included in the default
 |--------|--------|
 | **← →** / **Touch Tabs** | Navigate tabs (Pills navigation) |
 | **↑ ↓** | Scroll within pages (System, Storage, Network, Perf, Controller, About, Tools, Settings) |
-| **Y** | Force refresh / export perf metrics |
+| **Y** | Force refresh / export perf metrics (Perf page) |
 | **L / R** | Previous / next tab |
 | **Left / Right Stick** | Move the blue pointer |
 | **Right Stick up / down** | Scroll vertically within the current page |
@@ -165,6 +169,20 @@ Diagnostic reports are automatically exported to:
 
 ---
 
+## 📄 Changelog v0.6
+
+* **New (Security)**: Added **CFW Anti-Ban & Telemetry Shield** (Network page) to verify DNS.mitm / 90DNS blocking against Nintendo telemetry endpoints (`ctest`, `dauth-lp1`, `receive-lp1`) with live async tests and alerts.
+* **New (Storage)**: Added **Atmosphere Crash Dumps & Junk Cleaner** (Storage page) to scan and safely delete crash, fatal, and erpt logs with reclaimed space reporting.
+* **New (Controller)**: **Authentic Hardware Joy-Con Colors** rendered directly from internal SPI flash with `#RRGGBB` color hex badges and Central Power Dashboard.
+* **New (Controller)**: **Interactive HD Rumble Suite** with touch and button triggers for Left Motor, Dual Motors, and Right Motor with active wave animation.
+* **New (Controller)**: **Stick Drift & Deadzone Live Analyzer** tracking real-time deviation %, neutral point precision, peak rest jitter, and interactive Reset Peak button.
+* **UI & Visual Polish**: Card title dot accents, battery % badge in header, inactive tab hover highlights, modern scrollbar on Storage page, and animated A-press cursor feedback.
+* **Fix (Tools)**: Resolved 'Environnement d'execution' text card overflow by streamlining the label.
+* **Fix (System)**: Fixed battery power estimation label layout and text overlap with grey diagnostic text.
+* **Fix (Tools)**: Fixed vertical spacing between Installed Titles, Running Games, and Game Launch Stats cards.
+* **Fix (Process Detection)**: Enabled display of running processes and system title IDs even when game title names are unmapped.
+* **Fix (Stats)**: Resolved game launch stats label truncation and fixed display of empty/unknown entries.
+
 ## 📄 Changelog v0.5
 
 * **Fix**: Made auto-refresh and temperature/memory alert thresholds adjustable by touch in Settings.
@@ -201,13 +219,13 @@ Diagnostic reports are automatically exported to:
 * **Fix**: Replaced primitive text arrows with modern continuous vertical scrollbars.
 * **Fix**: Tab bar label clipping resolved with modern capsule "pill" navigation.
 * **Fix**: Safe folder navigation and heap-allocated sort buffers in File Browser.
-* **New**: Real-time **EmuMMC vs SysNAND** environment detection.
+* **New**: EmuMMC configuration-file/folder hint; the currently active NAND is not verified.
 * **New**: **Battery Health %** and raw millivolt (**mV**) voltage diagnostics.
 * **New**: **Stick Drift detector** & interactive deadzone visualizer on Controller page.
 * **New**: Structured **JSON export** (`sysinfo.json`) alongside standard text report.
 * **New**: 2 brand-new themes: **OLED Pure Black** and **Cyberpunk Neon** (18 themes total).
 * **New**: Modern floating translucent toast notification badges with colored status pips.
-* **New**: Public DNS network latency measurement (**ping in ms**).
+* **New**: TCP connection-time measurement against the Nintendo test endpoint.
 * **Fix**: Improved FTP client compatibility, including explicit plain-FTP fallback when clients request unsupported TLS and idle-session cleanup.
 * **Performance**: Increased FTP TCP and transfer buffers; verified a 9.4 MB upload in about 3 seconds on the tested network.
 * **New**: Live FTP upload/download progress, byte count, and transfer rate on the Transfer page; percentage is shown when the client announces the file size.
