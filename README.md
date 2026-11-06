@@ -20,7 +20,7 @@ SwitchInfoNX is a homebrew utility for viewing Nintendo Switch system informatio
 
 ---
 
-## ✨ Features (v0.6)
+##  Features (v0.6)
 
 ###  System Information & Deep Hardware
 * **Firmware & Hardware**: Firmware version, serial number, hardware type (Erista V1 / Mariko V2 / Switch Lite / Switch OLED), region, system language, device nickname.
@@ -36,7 +36,7 @@ SwitchInfoNX is a homebrew utility for viewing Nintendo Switch system informatio
 * **File Details**: The browser shows the selected item's name, type, and file size in its footer; folders can be opened to inspect their contents.
 * **Game Save Backups**: Create dated snapshots and choose a specific snapshot to restore, with a safety backup made first.
 
-### 🌐 Network & Latency Diagnostics
+###  Network & Latency Diagnostics
 * **Network Status**: IP & MAC addresses, connection type, SSID, Wi-Fi signal-strength samples, and the last 20 TCP connection-time test results.
 * **Speed & Latency**: Download/upload throughput tests and the average time for two TCP connections to a Nintendo test endpoint on port 80. This is not ICMP ping; the displayed range is based on those same two attempts.
 * **Live Network Traffic**: One-second receive/send rates, session totals, and a 60-second history graph from active system interfaces; these counters cover system traffic, not only SwitchInfoNX.
@@ -60,7 +60,7 @@ SwitchInfoNX is a homebrew utility for viewing Nintendo Switch system informatio
 * **Wi-Fi FTP Server**: Dual-mode FTP / FTPD server with compatible command handling, reliable uploads and folder creation, tuned transfer buffers, and live progress / speed feedback on the Switch.
 * **Transfer Estimates**: Active transfers with a known size show an estimated time remaining based on observed progress.
 
-### 🎨 Modern UI & Custom Themes
+###  Modern UI & Custom Themes
 * **Modern Dashboard**: Sleek pill-based navigation tab bar, section-colored cards, continuous vertical scrollbars, and floating translucent toast alerts.
 * **17 Built-in Presets**: Including **OLED Pure Black** (true black `#000000` power-saving mode) and **Cyberpunk Neon**, plus a full 10-slot real-time RGB custom theme editor.
 * **Theme Preview**: Settings includes a live sample of the selected theme's background, card, border, and accent colors.
@@ -211,25 +211,6 @@ Diagnostic reports are automatically exported to:
 * **Ultrahand Overlay**: Added a standalone, natively identified network monitor with live rates, session totals, 60-second history, connection details, reset, and CSV export.
 * **Tools / Ultrahand**: Added a localized step-by-step installation and transfer guide for the native OVL.
 * **About**: Updated the v0.5 feature list and removed implemented traffic monitoring and overlay setup from the future roadmap; sysmodule support is explicitly marked as in development.
-
-## 📄 Changelog v0.4
-
-* **Fix**: Unified binary/decimal byte calculation (`format_bytes`) across File Browser, FTP, and MTP.
-* **Fix**: Synchronized global `APP_VERSION` definition throughout UI, FTP daemon, and export banners.
-* **Fix**: Replaced primitive text arrows with modern continuous vertical scrollbars.
-* **Fix**: Tab bar label clipping resolved with modern capsule "pill" navigation.
-* **Fix**: Safe folder navigation and heap-allocated sort buffers in File Browser.
-* **New**: EmuMMC configuration-file/folder hint; the currently active NAND is not verified.
-* **New**: **Battery Health %** and raw millivolt (**mV**) voltage diagnostics.
-* **New**: **Stick Drift detector** & interactive deadzone visualizer on Controller page.
-* **New**: Structured **JSON export** (`sysinfo.json`) alongside standard text report.
-* **New**: 2 brand-new themes: **OLED Pure Black** and **Cyberpunk Neon** (18 themes total).
-* **New**: Modern floating translucent toast notification badges with colored status pips.
-* **New**: TCP connection-time measurement against the Nintendo test endpoint.
-* **Fix**: Improved FTP client compatibility, including explicit plain-FTP fallback when clients request unsupported TLS and idle-session cleanup.
-* **Performance**: Increased FTP TCP and transfer buffers; verified a 9.4 MB upload in about 3 seconds on the tested network.
-* **New**: Live FTP upload/download progress, byte count, and transfer rate on the Transfer page; percentage is shown when the client announces the file size.
-* **UI**: Tightened and vertically aligned the Transfer activity log to keep its latest entries clear of the scrollbar and card edge.
 
 ---
 
