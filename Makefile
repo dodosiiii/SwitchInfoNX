@@ -4,7 +4,7 @@ INCLUDES	:=	include include/mtp
 
 TITLE		:=	Switch Info NX
 AUTHOR		:=	dodosi
-VERSION		:=	0.6
+VERSION		:=	1.0
 
 ICON		:=	icon.jpg
 

@@ -2,13 +2,18 @@
 #include <tesla.hpp>
 
 #include <arpa/inet.h>
+#include <ctype.h>
+#include <dirent.h>
 #include <errno.h>
 #include <poll.h>
 #include <sys/socket.h>
 #include <stdio.h>
 #include <string.h>
 #include <sys/stat.h>
+#include <sys/statvfs.h>
 #include <unistd.h>
+
+#include <switch.h>
 
 #include "network_counters.h"
 #include "network_traffic_ipc.h"
@@ -40,6 +45,8 @@ bool socketReady = false;
 bool nifmReady = false;
 bool temperatureReady = false;
 bool batteryReady = false;
+bool clockReady = false;
+bool lblReady = false;
 bool systemModuleResponding = false;
 bool countersFromSystemModule = false;
 bool french = false;
@@ -63,6 +70,21 @@ std::string formatBytes(u64 value) {
     snprintf(text, sizeof(text), unit == 0 ? "%.0f %s" : "%.2f %s",
         amount, units[unit]);
     return text;
+}
+
+bool strCaseContains(const char *haystack, const char *needle) {
+    if (!haystack || !needle) return false;
+    while (*haystack) {
+        const char *h = haystack;
+        const char *n = needle;
+        while (*h && *n && tolower(static_cast<unsigned char>(*h)) == tolower(static_cast<unsigned char>(*n))) {
+            h++;
+            n++;
+        }
+        if (!*n) return true;
+        haystack++;
+    }
+    return false;
 }
 
 bool readSystemModuleCounters(NetworkTrafficResponse *response) {
@@ -253,6 +275,32 @@ std::string temperatureValue(TsLocation location) {
     return value;
 }
 
+std::string clockValue(PcvModuleId module) {
+    if (!clockReady)
+        return "--";
+
+    ClkrstSession session{};
+    if (R_FAILED(clkrstOpenSession(&session, module, 3)))
+        return "--";
+
+    u32 rateHz = 0;
+    Result rc = clkrstGetClockRate(&session, &rateHz);
+    clkrstCloseSession(&session);
+    if (R_FAILED(rc) || rateHz == 0)
+        return "--";
+
+    char text[32];
+    snprintf(text, sizeof(text), "%u MHz", rateHz / 1000000);
+    return text;
+}
+
+std::string operationModeValue() {
+    AppletOperationMode mode = appletGetOperationMode();
+    if (mode == AppletOperationMode_Console)
+        return tr("Docked (TV)", "Docke (TV)");
+    return tr("Handheld", "Portable");
+}
+
 std::string batteryValue() {
     if (!batteryReady)
         return "--";
@@ -266,32 +314,236 @@ std::string batteryValue() {
     return value;
 }
 
+std::string chargerValue() {
+    if (!batteryReady)
+        return "--";
+
+    PsmChargerType charger = PsmChargerType_Unconnected;
+    if (R_FAILED(psmGetChargerType(&charger)))
+        return "--";
+
+    switch (charger) {
+        case PsmChargerType_EnoughPower:
+            return tr("Charging (Full)", "En charge (Rapide)");
+        case PsmChargerType_LowPower:
+            return tr("Charging (USB)", "En charge (USB)");
+        case PsmChargerType_NotSupported:
+            return tr("Connected (Unsupported)", "Connecte (Non supporte)");
+        case PsmChargerType_Unconnected:
+        default:
+            return tr("On Battery", "Sur batterie");
+    }
+}
+
+std::string batteryHealthValue() {
+    if (!batteryReady)
+        return "--";
+
+    double age = 0.0;
+    if (R_FAILED(psmGetBatteryAgePercentage(&age)))
+        return "--";
+
+    char value[24];
+    snprintf(value, sizeof(value), "%.1f%%", age);
+    return value;
+}
+
+std::string sdSpaceValue() {
+    struct statvfs vfs{};
+    if (statvfs("sdmc:/", &vfs) != 0)
+        return "--";
+
+    u64 freeBytes = static_cast<u64>(vfs.f_bavail) * vfs.f_frsize;
+    u64 totalBytes = static_cast<u64>(vfs.f_blocks) * vfs.f_frsize;
+    return formatBytes(freeBytes) + " / " + formatBytes(totalBytes);
+}
+
+std::string sdFreePctValue() {
+    struct statvfs vfs{};
+    if (statvfs("sdmc:/", &vfs) != 0 || vfs.f_blocks == 0)
+        return "--";
+
+    u64 freeBytes = static_cast<u64>(vfs.f_bavail) * vfs.f_frsize;
+    u64 totalBytes = static_cast<u64>(vfs.f_blocks) * vfs.f_frsize;
+    int pct = static_cast<int>((freeBytes * 100) / totalBytes);
+    char text[32];
+    snprintf(text, sizeof(text), "%d%% %s", pct, tr("free", "libre"));
+    return text;
+}
+
+std::string brightnessValue() {
+    if (!lblReady)
+        return "--";
+
+    float b = 0.0f;
+    if (R_FAILED(lblGetCurrentBrightnessSetting(&b)))
+        return "--";
+
+    int pct = static_cast<int>(b * 100.0f + 0.5f);
+    char text[32];
+    snprintf(text, sizeof(text), "%d%%  ([A] %s)", pct, tr("Step", "Regler"));
+    return text;
+}
+
+void cycleBrightness() {
+    if (!lblReady)
+        return;
+
+    float b = 0.0f;
+    if (R_FAILED(lblGetCurrentBrightnessSetting(&b)))
+        return;
+
+    int pct = static_cast<int>(b * 100.0f + 0.5f);
+    float next = 0.50f;
+    if (pct < 35) next = 0.50f;
+    else if (pct < 60) next = 0.75f;
+    else if (pct < 85) next = 1.00f;
+    else next = 0.25f;
+    lblSetCurrentBrightnessSetting(next);
+}
+
+const char *findHekatePayload() {
+    if (access("sdmc:/bootloader/update.bin", F_OK) == 0)
+        return "sdmc:/bootloader/update.bin";
+    DIR *dir = opendir("sdmc:/bootloader/payloads");
+    if (dir) {
+        struct dirent *ent;
+        static char found_path[512];
+        while ((ent = readdir(dir)) != nullptr) {
+            if (strCaseContains(ent->d_name, "hekate") && strCaseContains(ent->d_name, ".bin")) {
+                snprintf(found_path, sizeof(found_path), "sdmc:/bootloader/payloads/%s", ent->d_name);
+                closedir(dir);
+                return found_path;
+            }
+        }
+        closedir(dir);
+    }
+    if (access("sdmc:/payload.bin", F_OK) == 0)
+        return "sdmc:/payload.bin";
+    if (access("sdmc:/atmosphere/reboot_payload.bin", F_OK) == 0)
+        return "sdmc:/atmosphere/reboot_payload.bin";
+    return nullptr;
+}
+
+void rebootToPayload() {
+    const char *payload = findHekatePayload();
+    if (payload && strcmp(payload, "sdmc:/atmosphere/reboot_payload.bin") != 0) {
+        mkdir("sdmc:/atmosphere", 0777);
+        FILE *src = fopen(payload, "rb");
+        if (src) {
+            FILE *dst = fopen("sdmc:/atmosphere/reboot_payload.bin", "wb");
+            if (dst) {
+                char buf[4096];
+                size_t n;
+                while ((n = fread(buf, 1, sizeof(buf), src)) > 0) {
+                    fwrite(buf, 1, n, dst);
+                }
+                fclose(dst);
+            }
+            fclose(src);
+        }
+    }
+    if (R_SUCCEEDED(spsmInitialize())) {
+        spsmShutdown(true);
+        spsmExit();
+    }
+    if (R_SUCCEEDED(bpcInitialize())) {
+        bpcRebootSystem();
+        bpcExit();
+    }
+}
+
+void rebootSystem() {
+    if (R_SUCCEEDED(spsmInitialize())) {
+        spsmShutdown(true);
+        spsmExit();
+    }
+    if (R_SUCCEEDED(bpcInitialize())) {
+        bpcRebootSystem();
+        bpcExit();
+    }
+}
+
+void shutdownSystem() {
+    if (R_SUCCEEDED(spsmInitialize())) {
+        spsmShutdown(false);
+        spsmExit();
+    }
+    if (R_SUCCEEDED(bpcInitialize())) {
+        bpcShutdownSystem();
+        bpcExit();
+    }
+}
+
 class NetworkGui : public tsl::Gui {
 public:
     tsl::elm::Element *createUI() override {
-        auto frame = new tsl::elm::OverlayFrame("SwitchInfoNX Status", "v0.5 | live status");
+        auto frame = new tsl::elm::OverlayFrame("SwitchInfoNX", "v1.0 | Overlay & Actions");
         auto list = new tsl::elm::List();
 
-        list->addItem(new tsl::elm::CategoryHeader(tr("System status", "Etat de la console")));
+        // Section 1: Hardware & Clocks
+        list->addItem(new tsl::elm::CategoryHeader(tr("Hardware & Performance", "Materiel & Performances")));
         socTemperatureItem = new tsl::elm::ListItem(tr("SoC temperature", "Temperature SoC"));
         pcbTemperatureItem = new tsl::elm::ListItem(tr("PCB temperature", "Temperature carte"));
-        batteryItem = new tsl::elm::ListItem(tr("Battery", "Batterie"));
+        cpuClockItem = new tsl::elm::ListItem(tr("CPU Clock", "Frequence CPU"));
+        gpuClockItem = new tsl::elm::ListItem(tr("GPU Clock", "Frequence GPU"));
+        ramClockItem = new tsl::elm::ListItem(tr("RAM Clock", "Frequence RAM"));
+        modeItem = new tsl::elm::ListItem(tr("Operation mode", "Mode console"));
         list->addItem(socTemperatureItem);
         list->addItem(pcbTemperatureItem);
-        list->addItem(batteryItem);
+        list->addItem(cpuClockItem);
+        list->addItem(gpuClockItem);
+        list->addItem(ramClockItem);
+        list->addItem(modeItem);
 
-        list->addItem(new tsl::elm::CategoryHeader(tr("Live traffic", "Trafic en direct")));
+        // Section 2: Battery & Power
+        list->addItem(new tsl::elm::CategoryHeader(tr("Battery & Power", "Batterie & Alimentation")));
+        batteryItem = new tsl::elm::ListItem(tr("Battery level", "Niveau batterie"));
+        powerSourceItem = new tsl::elm::ListItem(tr("Power source", "Alimentation"));
+        batteryHealthItem = new tsl::elm::ListItem(tr("Battery health", "Sante batterie"));
+        list->addItem(batteryItem);
+        list->addItem(powerSourceItem);
+        list->addItem(batteryHealthItem);
+
+        // Section 3: MicroSD Storage
+        list->addItem(new tsl::elm::CategoryHeader(tr("MicroSD Storage", "Stockage MicroSD")));
+        sdSpaceItem = new tsl::elm::ListItem(tr("SD Space (Free/Total)", "Espace SD (Libre/Total)"));
+        sdFreePctItem = new tsl::elm::ListItem(tr("SD Availability", "Disponibilite SD"));
+        list->addItem(sdSpaceItem);
+        list->addItem(sdFreePctItem);
+
+        // Section 4: Screen & Brightness
+        list->addItem(new tsl::elm::CategoryHeader(tr("Screen & Brightness", "Ecran & Luminosite")));
+        brightnessItem = new tsl::elm::ListItem(tr("Display brightness", "Luminosite ecran"));
+        brightnessItem->setClickListener([this](u64 keys) {
+            if (keys & HidNpadButton_A) {
+                cycleBrightness();
+                if (brightnessItem)
+                    brightnessItem->setValue(brightnessValue());
+                return true;
+            }
+            return false;
+        });
+        list->addItem(brightnessItem);
+
+        // Section 5: Live Traffic & Network
+        list->addItem(new tsl::elm::CategoryHeader(tr("Network & Traffic", "Reseau & Trafic live")));
+        connectionItem = new tsl::elm::ListItem(tr("Connection type", "Type de connexion"));
+        ipItem = new tsl::elm::ListItem("IP");
         counterItem = new tsl::elm::ListItem(tr("Interface counters", "Compteurs d'interface"));
         receiveItem = new tsl::elm::ListItem(tr("Download rate", "Debit entrant"));
         sendItem = new tsl::elm::ListItem(tr("Upload rate", "Debit sortant"));
         receiveTotalItem = new tsl::elm::ListItem(tr("Received this session", "Recu cette session"));
         sendTotalItem = new tsl::elm::ListItem(tr("Sent this session", "Envoye cette session"));
+        list->addItem(connectionItem);
+        list->addItem(ipItem);
         list->addItem(counterItem);
         list->addItem(receiveItem);
         list->addItem(sendItem);
         list->addItem(receiveTotalItem);
         list->addItem(sendTotalItem);
 
+        // Section 6: Graph (Last 60s)
         list->addItem(new tsl::elm::CategoryHeader(tr("Last 60 seconds", "60 dernieres secondes")));
         list->addItem(new tsl::elm::CustomDrawer([](tsl::gfx::Renderer *renderer,
             s32 x, s32 y, s32 width, s32 height) {
@@ -330,13 +582,42 @@ public:
                 top + graphHeight + 5, 16, tsl::Color{0x8, 0x8, 0x8, 0xF});
         }), 150);
 
-        list->addItem(new tsl::elm::CategoryHeader(tr("Connection", "Connexion")));
-        connectionItem = new tsl::elm::ListItem(tr("Connection type", "Type de connexion"));
-        ipItem = new tsl::elm::ListItem("IP");
-        list->addItem(connectionItem);
-        list->addItem(ipItem);
+        // Section 7: Power & Quick Actions
+        list->addItem(new tsl::elm::CategoryHeader(tr("Power & Quick Actions", "Alimentation & Actions")));
+        
+        auto rebootHekateItem = new tsl::elm::ListItem(
+            tr("Reboot to Hekate / Payload", "Redemarrer sur Hekate / Payload"));
+        rebootHekateItem->setClickListener([](u64 keys) {
+            if (keys & HidNpadButton_A) {
+                rebootToPayload();
+                return true;
+            }
+            return false;
+        });
+        list->addItem(rebootHekateItem);
 
-        list->addItem(new tsl::elm::CategoryHeader(tr("Actions", "Actions")));
+        auto rebootSysItem = new tsl::elm::ListItem(
+            tr("Reboot Console", "Redemarrer la console"));
+        rebootSysItem->setClickListener([](u64 keys) {
+            if (keys & HidNpadButton_A) {
+                rebootSystem();
+                return true;
+            }
+            return false;
+        });
+        list->addItem(rebootSysItem);
+
+        auto shutdownItem = new tsl::elm::ListItem(
+            tr("Power Off Console", "Eteindre la console"));
+        shutdownItem->setClickListener([](u64 keys) {
+            if (keys & HidNpadButton_A) {
+                shutdownSystem();
+                return true;
+            }
+            return false;
+        });
+        list->addItem(shutdownItem);
+
         auto resetItem = new tsl::elm::ListItem(tr("Reset session totals", "Reinitialiser les totaux"));
         resetItem->setClickListener([this](u64 keys) {
             if (keys & HidNpadButton_A) {
@@ -371,12 +652,42 @@ public:
             return;
         lastUiUpdateTick = now;
         sampleTraffic();
+
         if (socTemperatureItem)
             socTemperatureItem->setValue(temperatureValue(TsLocation_External));
         if (pcbTemperatureItem)
             pcbTemperatureItem->setValue(temperatureValue(TsLocation_Internal));
+        if (cpuClockItem)
+            cpuClockItem->setValue(clockValue(PcvModuleId_CpuBus));
+        if (gpuClockItem)
+            gpuClockItem->setValue(clockValue(PcvModuleId_GPU));
+        if (ramClockItem)
+            ramClockItem->setValue(clockValue(PcvModuleId_EMC));
+        if (modeItem)
+            modeItem->setValue(operationModeValue());
+
         if (batteryItem)
             batteryItem->setValue(batteryValue());
+        if (powerSourceItem)
+            powerSourceItem->setValue(chargerValue());
+        if (batteryHealthItem)
+            batteryHealthItem->setValue(batteryHealthValue());
+
+        if (sdSpaceItem)
+            sdSpaceItem->setValue(sdSpaceValue());
+        if (sdFreePctItem)
+            sdFreePctItem->setValue(sdFreePctValue());
+
+        if (brightnessItem)
+            brightnessItem->setValue(brightnessValue());
+
+        if (connectionItem)
+            connectionItem->setValue(connectionValue());
+        if (ipItem)
+            ipItem->setValue(ipValue());
+        if (exportItem)
+            exportItem->setValue(exportStatus, true);
+
         if (!counterItem)
             return;
 
@@ -409,16 +720,25 @@ public:
             receiveItem->setValue("--");
             sendItem->setValue("--");
         }
-
-        connectionItem->setValue(connectionValue());
-        ipItem->setValue(ipValue());
-        exportItem->setValue(exportStatus, true);
     }
 
 private:
     tsl::elm::ListItem *socTemperatureItem = nullptr;
     tsl::elm::ListItem *pcbTemperatureItem = nullptr;
+    tsl::elm::ListItem *cpuClockItem = nullptr;
+    tsl::elm::ListItem *gpuClockItem = nullptr;
+    tsl::elm::ListItem *ramClockItem = nullptr;
+    tsl::elm::ListItem *modeItem = nullptr;
+
     tsl::elm::ListItem *batteryItem = nullptr;
+    tsl::elm::ListItem *powerSourceItem = nullptr;
+    tsl::elm::ListItem *batteryHealthItem = nullptr;
+
+    tsl::elm::ListItem *sdSpaceItem = nullptr;
+    tsl::elm::ListItem *sdFreePctItem = nullptr;
+
+    tsl::elm::ListItem *brightnessItem = nullptr;
+
     tsl::elm::ListItem *counterItem = nullptr;
     tsl::elm::ListItem *receiveItem = nullptr;
     tsl::elm::ListItem *sendItem = nullptr;
@@ -443,6 +763,8 @@ public:
         nifmReady = R_SUCCEEDED(nifmInitialize(NifmServiceType_User));
         temperatureReady = R_SUCCEEDED(tsInitialize());
         batteryReady = R_SUCCEEDED(psmInitialize());
+        clockReady = R_SUCCEEDED(clkrstInitialize());
+        lblReady = R_SUCCEEDED(lblInitialize());
 
         u64 languageCode = 0;
         SetLanguage language;
@@ -452,6 +774,10 @@ public:
     }
 
     void exitServices() override {
+        if (lblReady)
+            lblExit();
+        if (clockReady)
+            clkrstExit();
         if (nifmReady)
             nifmExit();
         if (batteryReady)
@@ -460,6 +786,8 @@ public:
             tsExit();
         if (socketReady)
             socketExit();
+        lblReady = false;
+        clockReady = false;
         nifmReady = false;
         batteryReady = false;
         temperatureReady = false;

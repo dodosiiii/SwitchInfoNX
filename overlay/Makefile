@@ -7,9 +7,9 @@ include $(DEVKITPRO)/libnx/switch_rules
 
 TARGET := SwitchInfoNX
 BUILD := build
-APP_TITLE := SwitchInfoNX Network
+APP_TITLE := SwitchInfoNX
 APP_AUTHOR := dodosi
-APP_VERSION := 0.5.0
+APP_VERSION := 1.0.0
 NO_ICON := 1
 export NROFLAGS := --nacp=$(TOPDIR)/$(TARGET).nacp
 
