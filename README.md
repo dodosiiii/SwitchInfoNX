@@ -16,9 +16,9 @@ SwitchInfoNX is a homebrew utility for the Nintendo Switch that combines hardwar
 
 ---
 
-## ✨ Features
+##  Features
 
-### ⚡ System & Power
+###  System & Power
 - **Live SoC temperature** displayed in the header across all pages with dynamic color coding.
 - **Hardware info**: firmware version, serial number, hardware type (Erista V1 / Mariko V2 / Lite / OLED), region, language, device nickname.
 - **EmuMMC hint**: reports whether an EmuMMC configuration file or folder is present on the SD card.
@@ -27,7 +27,7 @@ SwitchInfoNX is a homebrew utility for the Nintendo Switch that combines hardwar
 - **Reboot to Hekate**: auto-locates Hekate payloads and triggers a warm reboot with confirmation.
 - **System Restart & Power-off**: fast reboot and shutdown with zero filesystem risk.
 
-### 💾 Storage & File Management
+###  Storage & File Management
 - **Storage overview**: SD card and USER / SYSTEM NAND partition usage.
 - **SD Speed Test**: 16 MB write / read-back throughput test (cached read-back; not a physical SD benchmark).
 - **SD Space Analyzer**: manual scan with progress, category totals (Nintendo / homebrew / CFW / media / other), in-memory caching, and direct shortcuts into the file browser.
@@ -37,13 +37,13 @@ SwitchInfoNX is a homebrew utility for the Nintendo Switch that combines hardwar
 - **Crash Dump Purge**: scans and deletes Atmosphère `/crash_reports`, `/fatal_reports`, and `/erpt_reports` with reclaimed-space reporting.
 - **Game Save Backups**: create dated snapshots and restore a selected one (live save backed up first).
 
-### 🌐 Network & Diagnostics
+###  Network & Diagnostics
 - **Network status**: IP & MAC addresses, connection type, SSID, Wi-Fi signal strength, last 20 TCP connection-time results.
 - **Speed & Latency**: download / upload throughput tests and TCP connection time against Nintendo's test endpoint on port 80.
 - **Live traffic**: 1-second RX / TX rates, session totals, and a 60-second history graph from active system interfaces.
 - **CFW Anti-Ban & Telemetry Shield**: live async DNS.mitm / 90DNS tests against Nintendo telemetry endpoints (`ctest`, `dauth-lp1`, `receive-lp1`).
 
-### 📶 Ultrahand Overlay
+###  Ultrahand Overlay
 A native Ultrahand `.ovl` with:
 - Live CPU / GPU / EMC clock speeds (MHz)
 - Operation mode (Docked / Handheld)
@@ -54,7 +54,7 @@ A native Ultrahand `.ovl` with:
 - Session reset and CSV export to `sdmc:/switch/SwitchInfoNX/network_traffic.csv`
 - **Power & Quick Actions**: Reboot to Hekate / payload, Reboot Console, Power Off Console
 
-### 🖥️ Performance & Hardware
+### Performance & Hardware
 - **Live clocks**: real-time CPU, GPU, and EMC frequencies.
 - **Performance graphs**: app loop rate and temperature samples with rolling min / average / max summaries.
 - **Clock scaling**: touch-adjustable CPU / GPU sliders rounded to supported clock rates.
@@ -62,14 +62,14 @@ A native Ultrahand `.ovl` with:
 - **Performance export**: press **Y** on the Perf page to append a snapshot to `sdmc:/switch/SwitchInfoNX/perf_metrics_v06.csv`.
 - **Fan control feedback**: shows the controller-reported fan level with a note that thermal protections may override it.
 
-### 🎮 Controller Diagnostics
+###  Controller Diagnostics
 - **Interactive controller test**: live button state mapping, analog trigger visualization, 6-axis gyroscope & accelerometer readout.
 - **Stick position display**: live coordinates and center reference (not a drift diagnosis or calibrated deadzone test).
 - **Joy-Con colors**: rendered from internal SPI flash with `#RRGGBB` hex badges.
 - **HD Rumble Suite**: touch / button triggers for Left, Dual, and Right motors with active wave animation.
 - **Stick Drift & Deadzone Analyzer**: real-time deviation %, neutral point precision, peak rest jitter, and Reset Peak button.
 
-### 📡 File Transfers
+###  File Transfers
 - **HTTP Browser Transfer**: start the built-in HTTP server, scan the QR code with your phone, and transfer files without typing an IP address. Supports browsing, downloading, uploading (with directory structure), folder creation, and deletion. Each session generates a temporary 8-digit access code (username `switch`).
 - **Wi-Fi FTP Server**: dual-mode FTP / FTPD server with live progress, speed, and ETA feedback on the Switch screen.
 - **USB MTP Transfer**: built-in MTP server for drag-and-drop transfers with PC at USB speeds.
@@ -77,7 +77,7 @@ A native Ultrahand `.ovl` with:
 
 > **Security note**: HTTP is unencrypted and intended for a trusted local network only. Do not expose port 8080 to the Internet.
 
-### 🎨 UI & Themes
+###  UI & Themes
 - **Modern dashboard**: pill-based tab bar, section-colored cards, continuous vertical scrollbars, translucent toast alerts.
 - **17 built-in themes**: including **OLED Pure Black** (true `#000000`) and **Cyberpunk Neon**.
 - **Custom theme editor**: 10-slot real-time RGB editor with Ocean / Sunset / Forest quick palettes and live preview.
@@ -87,7 +87,7 @@ A native Ultrahand `.ovl` with:
 
 ---
 
-## 📥 Installation
+##  Installation
 
 ### Main app
 
@@ -115,7 +115,7 @@ Reboot. **Disable:** remove `boot2.flag` and reboot. **Uninstall:** remove the w
 
 ---
 
-## 🔨 Building from source
+##  Building from source
 
 ### Prerequisites
 
@@ -140,7 +140,7 @@ Build the sysmodule separately: `make sysmodule`.
 
 ---
 
-## 🕹️ Controls
+##  Controls
 
 | Button | Action |
 |--------|--------|
@@ -156,7 +156,7 @@ Build the sysmodule separately: `make sysmodule`.
 
 ---
 
-## ⚙️ Configuration
+##  Configuration
 
 Settings are saved to `sdmc:/switch/SwitchInfoNX/config.txt`:
 
@@ -176,7 +176,7 @@ Diagnostic exports:
 
 ---
 
-## 🛠️ Tech Stack
+##  Tech Stack
 
 | Component | Library / Tool |
 |-----------|---------------|
@@ -189,7 +189,7 @@ Diagnostic exports:
 
 ---
 
-## 📄 Changelog
+##  Changelog
 
 See [CHANGELOG.md](CHANGELOG.md) for the full version history.
 
